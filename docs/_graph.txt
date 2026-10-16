@@ -1,0 +1,324 @@
+# mechanical call graph (file -> files whose functions it calls)
+
+celt/bands.c -> celt/entcode.c [ec_tell_frac×12]; celt/entdec.c [ec_dec_uint×3, ec_decode×2, ec_dec_update×2, ec_dec_bits×2, ec_dec_bit_logp×1]; celt/entenc.c [ec_enc_uint×3, ec_encode×2, ec_enc_bits×2, ec_enc_bit_logp×1]; celt/mathops.c [celt_cos_norm32×6, celt_sqrt×3, isqrt32×2, celt_rsqrt_norm32×2, celt_rsqrt_norm×1, celt_sqrt32×1, celt_rcp_norm32×1]; celt/vq.c [celt_inner_prod_norm_shift×6, renormalise_vector×2, stereo_itheta×2, cubic_quant×2, cubic_unquant×2, alg_quant×1, alg_unquant×1]
+celt/celt.c -> (none)
+celt/celt_decoder.c -> celt/bands.c [denormalise_bands×8, quant_all_bands×2, celt_lcg_rand×1, anti_collapse×1]; celt/celt.c [comb_filter×5, resampling_factor×1, init_caps×1]; celt/celt_lpc.c [_celt_lpc×1, celt_iir×1, _celt_autocorr×1]; celt/entcode.c [ec_tell_frac×5]; celt/entdec.c [ec_dec_bit_logp×10, ec_dec_init×5, ec_dec_icdf×3, ec_dec_bits×3, ec_dec_uint×2]; celt/mathops.c [frac_div32×2, celt_sqrt×2]; celt/modes.c [opus_custom_mode_create×5, compute_qext_mode×1]; celt/pitch.c [pitch_downsample×1, pitch_search×1]; celt/quant_bands.c [unquant_fine_energy×3, unquant_coarse_energy×2, unquant_energy_finalise×1]; celt/rate.c [clt_compute_allocation×1, clt_compute_extra_allocation×1]; celt/vq.c [renormalise_vector×1]
+celt/celt_encoder.c -> celt/bands.c [compute_band_energies×4, hysteresis_decision×3, normalise_bands×2, haar1×2, quant_all_bands×2, anti_collapse×1, spreading_decision×1]; celt/celt.c [comb_filter×5, resampling_factor×1, init_caps×1]; celt/celt_decoder.c [deemphasis×1, celt_synthesis×1]; celt/entcode.c [ec_tell_frac×7]; celt/entenc.c [ec_enc_bit_logp×9, ec_enc_shrink×6, ec_enc_init×5, ec_enc_icdf×3, ec_enc_bits×3, ec_enc_uint×2, ec_enc_done×2]; celt/mathops.c [celt_sqrt×6, frac_div32_q29×2, celt_rcp×1]; celt/modes.c [opus_custom_mode_create×4, compute_qext_mode×1]; celt/pitch.c [pitch_downsample×1, pitch_search×1, remove_doubling×1]; celt/quant_bands.c [amp2Log2×4, quant_fine_energy×3, quant_coarse_energy×2, quant_energy_finalise×2]; celt/rate.c [clt_compute_allocation×1, clt_compute_extra_allocation×1]; celt/vq.c [celt_inner_prod_norm_shift×2]
+celt/celt_lpc.c -> celt/mathops.c [frac_div32×1]
+celt/cwrs.c -> celt/entdec.c [ec_dec_uint×2]; celt/entenc.c [ec_enc_uint×2]
+celt/entcode.c -> (none)
+celt/entdec.c -> (none)
+celt/entenc.c -> (none)
+celt/kiss_fft.c -> (none)
+celt/laplace.c -> celt/entdec.c [ec_dec_icdf16×2, ec_dec_init×1, ec_decode_bin×1, ec_dec_update×1]; celt/entenc.c [ec_enc_icdf16×2, ec_enc_init×1, ec_encode_bin×1, ec_enc_done×1]
+celt/mathops.c -> (none)
+celt/mdct.c -> celt/kiss_fft.c [opus_fft_impl×2, opus_fft_alloc_twiddles×1, opus_fft_alloc×1, opus_fft_free×1]; celt/mathops.c [celt_cos_norm×1]
+celt/modes.c -> celt/cwrs.c [log2_frac×1]; celt/mdct.c [clt_mdct_init×1, clt_mdct_clear×1]; celt/rate.c [compute_pulse_cache×2]
+celt/pitch.c -> celt/celt_lpc.c [_celt_lpc×1, _celt_autocorr×1]; celt/mathops.c [frac_div32×1, celt_rsqrt_norm×1, celt_sqrt×1]
+celt/quant_bands.c -> celt/entcode.c [ec_tell_frac×2]; celt/entdec.c [ec_dec_bits×2, ec_dec_bit_logp×1, ec_dec_icdf×1]; celt/entenc.c [ec_enc_bit_logp×2, ec_enc_bits×2, ec_enc_icdf×1]; celt/laplace.c [ec_laplace_encode×1, ec_laplace_decode×1]
+celt/rate.c -> celt/cwrs.c [get_required_bits×1]; celt/entcode.c [ec_tell_frac×2]; celt/entdec.c [ec_dec_icdf×3, ec_dec_bit_logp×2, ec_dec_uint×2]; celt/entenc.c [ec_enc_bit_logp×3, ec_enc_icdf×3, ec_enc_uint×2]
+celt/vq.c -> celt/cwrs.c [encode_pulses×3, decode_pulses×1]; celt/entdec.c [ec_dec_bits×6, ec_dec_uint×2, ec_dec_bit_logp×1]; celt/entenc.c [ec_enc_bits×6, ec_enc_uint×2, ec_enc_bit_logp×1]; celt/mathops.c [celt_rcp_norm32×3, celt_rcp×3, celt_rsqrt_norm32×2, celt_sqrt32×2, celt_cos_norm×2, celt_rsqrt_norm×1]
+silk/A2NLSF.c -> silk/bwexpander_32.c [silk_bwexpander_32×1]
+silk/CNG.c -> silk/NLSF2A.c [silk_NLSF2A×1]
+silk/HP_variable_cutoff.c -> silk/lin2log.c [silk_lin2log×4]
+silk/LPC_analysis_filter.c -> (none)
+silk/LPC_fit.c -> silk/bwexpander_32.c [silk_bwexpander_32×1]
+silk/LPC_inv_pred_gain.c -> (none)
+silk/LP_variable_cutoff.c -> silk/biquad_alt.c [silk_biquad_alt_stride1×1]
+silk/NLSF2A.c -> silk/LPC_fit.c [silk_LPC_fit×1]; silk/bwexpander_32.c [silk_bwexpander_32×1]
+silk/NLSF_VQ.c -> (none)
+silk/NLSF_VQ_weights_laroia.c -> (none)
+silk/NLSF_decode.c -> silk/NLSF_stabilize.c [silk_NLSF_stabilize×1]; silk/NLSF_unpack.c [silk_NLSF_unpack×1]
+silk/NLSF_del_dec_quant.c -> (none)
+silk/NLSF_encode.c -> silk/NLSF_VQ.c [silk_NLSF_VQ×1]; silk/NLSF_decode.c [silk_NLSF_decode×1]; silk/NLSF_del_dec_quant.c [silk_NLSF_del_dec_quant×1]; silk/NLSF_stabilize.c [silk_NLSF_stabilize×1]; silk/NLSF_unpack.c [silk_NLSF_unpack×1]; silk/lin2log.c [silk_lin2log×1]; silk/sort.c [silk_insertion_sort_increasing×2]
+silk/NLSF_stabilize.c -> silk/sort.c [silk_insertion_sort_increasing_all_values_int16×1]
+silk/NLSF_unpack.c -> (none)
+silk/NSQ.c -> silk/LPC_analysis_filter.c [silk_LPC_analysis_filter×1]
+silk/NSQ_del_dec.c -> silk/LPC_analysis_filter.c [silk_LPC_analysis_filter×1]
+silk/PLC.c -> silk/LPC_analysis_filter.c [silk_LPC_analysis_filter×1]; silk/bwexpander.c [silk_bwexpander×1]; silk/sum_sqr_shift.c [silk_sum_sqr_shift×4]
+silk/VAD.c -> silk/ana_filt_bank_1.c [silk_ana_filt_bank_1×3]; silk/lin2log.c [silk_lin2log×2]; silk/sigm_Q15.c [silk_sigm_Q15×3]
+silk/VQ_WMat_EC.c -> silk/lin2log.c [silk_lin2log×1]
+silk/ana_filt_bank_1.c -> (none)
+silk/biquad_alt.c -> (none)
+silk/bwexpander.c -> (none)
+silk/bwexpander_32.c -> (none)
+silk/check_control_input.c -> (none)
+silk/code_signs.c -> celt/entdec.c [ec_dec_icdf×2]; celt/entenc.c [ec_enc_icdf×1]
+silk/control_SNR.c -> (none)
+silk/control_audio_bandwidth.c -> (none)
+silk/control_codec.c -> silk/control_audio_bandwidth.c [silk_control_audio_bandwidth×1]; silk/resampler.c [silk_resampler_init×3, silk_resampler×2]
+silk/debug.c -> (none)
+silk/dec_API.c -> celt/entdec.c [ec_dec_bit_logp×2, ec_dec_icdf×1]; silk/decode_frame.c [silk_decode_frame×1]; silk/decode_indices.c [silk_decode_indices×1]; silk/decode_pulses.c [silk_decode_pulses×1]; silk/decoder_set_fs.c [silk_decoder_set_fs×1]; silk/init_decoder.c [silk_init_decoder×2, silk_reset_decoder×1]; silk/resampler.c [silk_resampler×4]; silk/stereo_MS_to_LR.c [silk_stereo_MS_to_LR×1]; silk/stereo_decode_pred.c [silk_stereo_decode_pred×2, silk_stereo_decode_mid_only×2]
+silk/decode_core.c -> silk/LPC_analysis_filter.c [silk_LPC_analysis_filter×1]
+silk/decode_frame.c -> silk/CNG.c [silk_CNG×1]; silk/PLC.c [silk_PLC×2, silk_PLC_glue_frames×1]; silk/decode_core.c [silk_decode_core×1]; silk/decode_indices.c [silk_decode_indices×1]; silk/decode_parameters.c [silk_decode_parameters×1]; silk/decode_pulses.c [silk_decode_pulses×1]
+silk/decode_indices.c -> celt/entdec.c [ec_dec_icdf×19]; silk/NLSF_unpack.c [silk_NLSF_unpack×1]
+silk/decode_parameters.c -> silk/NLSF2A.c [silk_NLSF2A×2]; silk/NLSF_decode.c [silk_NLSF_decode×1]; silk/bwexpander.c [silk_bwexpander×2]; silk/decode_pitch.c [silk_decode_pitch×1]; silk/gain_quant.c [silk_gains_dequant×1]
+silk/decode_pitch.c -> (none)
+silk/decode_pulses.c -> celt/entdec.c [ec_dec_icdf×4]; silk/code_signs.c [silk_decode_signs×1]; silk/shell_coder.c [silk_shell_decoder×1]
+silk/decoder_set_fs.c -> silk/resampler.c [silk_resampler_init×1]
+silk/enc_API.c -> celt/entenc.c [ec_enc_icdf×2, ec_enc_patch_initial_bits×1]; silk/HP_variable_cutoff.c [silk_HP_variable_cutoff×1]; silk/check_control_input.c [check_control_input×1]; silk/control_SNR.c [silk_control_SNR×1]; silk/control_codec.c [silk_control_encoder×1]; silk/encode_indices.c [silk_encode_indices×1]; silk/encode_pulses.c [silk_encode_pulses×1]; silk/init_encoder.c [silk_init_encoder×3]; silk/resampler.c [silk_resampler×5]; silk/stereo_LR_to_MS.c [silk_stereo_LR_to_MS×1]; silk/stereo_encode_pred.c [silk_stereo_encode_pred×2, silk_stereo_encode_mid_only×2]
+silk/encode_indices.c -> celt/entenc.c [ec_enc_icdf×21]; silk/NLSF_unpack.c [silk_NLSF_unpack×1]
+silk/encode_pulses.c -> celt/entenc.c [ec_enc_icdf×7]; silk/code_signs.c [silk_encode_signs×1]; silk/shell_coder.c [silk_shell_encoder×1]
+silk/fixed/LTP_analysis_filter_FIX.c -> (none)
+silk/fixed/LTP_scale_ctrl_FIX.c -> silk/log2lin.c [silk_log2lin×2]
+silk/fixed/apply_sine_window_FIX.c -> (none)
+silk/fixed/autocorr_FIX.c -> celt/celt_lpc.c [_celt_autocorr×1]
+silk/fixed/burg_modified_FIX.c -> silk/fixed/vector_ops_FIX.c [silk_inner_prod_aligned×1]
+silk/fixed/corrMatrix_FIX.c -> silk/fixed/vector_ops_FIX.c [silk_inner_prod_aligned×2]; silk/sum_sqr_shift.c [silk_sum_sqr_shift×1]
+silk/fixed/encode_frame_FIX.c -> silk/LP_variable_cutoff.c [silk_LP_variable_cutoff×1]; silk/encode_indices.c [silk_encode_indices×2]; silk/encode_pulses.c [silk_encode_pulses×2]; silk/fixed/find_pitch_lags_FIX.c [silk_find_pitch_lags_FIX×1]; silk/fixed/find_pred_coefs_FIX.c [silk_find_pred_coefs_FIX×1]; silk/fixed/noise_shape_analysis_FIX.c [silk_noise_shape_analysis_FIX×1]; silk/fixed/process_gains_FIX.c [silk_process_gains_FIX×1]; silk/gain_quant.c [silk_gains_ID×2, silk_gains_quant×1, silk_gains_dequant×1]
+silk/fixed/find_LPC_FIX.c -> silk/A2NLSF.c [silk_A2NLSF×2]; silk/LPC_analysis_filter.c [silk_LPC_analysis_filter×1]; silk/NLSF2A.c [silk_NLSF2A×1]; silk/interpolate.c [silk_interpolate×1]; silk/sum_sqr_shift.c [silk_sum_sqr_shift×2]
+silk/fixed/find_LTP_FIX.c -> silk/fixed/corrMatrix_FIX.c [silk_corrVector_FIX×1, silk_corrMatrix_FIX×1]; silk/sum_sqr_shift.c [silk_sum_sqr_shift×1]
+silk/fixed/find_pitch_lags_FIX.c -> silk/LPC_analysis_filter.c [silk_LPC_analysis_filter×1]; silk/bwexpander.c [silk_bwexpander×1]; silk/fixed/apply_sine_window_FIX.c [silk_apply_sine_window×2]; silk/fixed/autocorr_FIX.c [silk_autocorr×1]; silk/fixed/k2a_FIX.c [silk_k2a×1]; silk/fixed/pitch_analysis_core_FIX.c [silk_pitch_analysis_core×1]; silk/fixed/schur_FIX.c [silk_schur×1]
+silk/fixed/find_pred_coefs_FIX.c -> silk/fixed/LTP_analysis_filter_FIX.c [silk_LTP_analysis_filter_FIX×1]; silk/fixed/LTP_scale_ctrl_FIX.c [silk_LTP_scale_ctrl_FIX×1]; silk/fixed/find_LPC_FIX.c [silk_find_LPC_FIX×1]; silk/fixed/find_LTP_FIX.c [silk_find_LTP_FIX×1]; silk/fixed/residual_energy_FIX.c [silk_residual_energy_FIX×1]; silk/fixed/vector_ops_FIX.c [silk_scale_copy_vector16×1]; silk/log2lin.c [silk_log2lin×1]; silk/process_NLSFs.c [silk_process_NLSFs×1]; silk/quant_LTP_gains.c [silk_quant_LTP_gains×1]
+silk/fixed/k2a_FIX.c -> (none)
+silk/fixed/k2a_Q16_FIX.c -> (none)
+silk/fixed/noise_shape_analysis_FIX.c -> silk/LPC_fit.c [silk_LPC_fit×1]; silk/bwexpander_32.c [silk_bwexpander_32×2]; silk/fixed/apply_sine_window_FIX.c [silk_apply_sine_window×2]; silk/fixed/autocorr_FIX.c [silk_autocorr×1]; silk/fixed/k2a_Q16_FIX.c [silk_k2a_Q16×1]; silk/fixed/schur64_FIX.c [silk_schur64×1]; silk/lin2log.c [silk_lin2log×1]; silk/log2lin.c [silk_log2lin×2]; silk/sigm_Q15.c [silk_sigm_Q15×1]; silk/sum_sqr_shift.c [silk_sum_sqr_shift×1]
+silk/fixed/pitch_analysis_core_FIX.c -> silk/fixed/vector_ops_FIX.c [silk_inner_prod_aligned×7]; silk/lin2log.c [silk_lin2log×2]; silk/resampler_down2.c [silk_resampler_down2×2]; silk/resampler_down2_3.c [silk_resampler_down2_3×1]; silk/sort.c [silk_insertion_sort_decreasing_int16×1]; silk/sum_sqr_shift.c [silk_sum_sqr_shift×1]
+silk/fixed/process_gains_FIX.c -> silk/gain_quant.c [silk_gains_quant×1]; silk/log2lin.c [silk_log2lin×1]; silk/sigm_Q15.c [silk_sigm_Q15×1]
+silk/fixed/regularize_correlations_FIX.c -> (none)
+silk/fixed/residual_energy16_FIX.c -> (none)
+silk/fixed/residual_energy_FIX.c -> silk/LPC_analysis_filter.c [silk_LPC_analysis_filter×1]; silk/sum_sqr_shift.c [silk_sum_sqr_shift×1]
+silk/fixed/schur64_FIX.c -> (none)
+silk/fixed/schur_FIX.c -> (none)
+silk/fixed/vector_ops_FIX.c -> (none)
+silk/fixed/warped_autocorrelation_FIX.c -> (none)
+silk/float/LPC_analysis_filter_FLP.c -> (none)
+silk/float/LPC_inv_pred_gain_FLP.c -> (none)
+silk/float/LTP_analysis_filter_FLP.c -> (none)
+silk/float/LTP_scale_ctrl_FLP.c -> silk/log2lin.c [silk_log2lin×2]
+silk/float/apply_sine_window_FLP.c -> (none)
+silk/float/autocorrelation_FLP.c -> (none)
+silk/float/burg_modified_FLP.c -> silk/float/energy_FLP.c [silk_energy_FLP×2]
+silk/float/bwexpander_FLP.c -> (none)
+silk/float/corrMatrix_FLP.c -> silk/float/energy_FLP.c [silk_energy_FLP×1]
+silk/float/encode_frame_FLP.c -> silk/LP_variable_cutoff.c [silk_LP_variable_cutoff×1]; silk/encode_indices.c [silk_encode_indices×2]; silk/encode_pulses.c [silk_encode_pulses×2]; silk/float/find_pitch_lags_FLP.c [silk_find_pitch_lags_FLP×1]; silk/float/find_pred_coefs_FLP.c [silk_find_pred_coefs_FLP×1]; silk/float/noise_shape_analysis_FLP.c [silk_noise_shape_analysis_FLP×1]; silk/float/process_gains_FLP.c [silk_process_gains_FLP×1]; silk/float/wrappers_FLP.c [silk_NSQ_wrapper_FLP×2]; silk/gain_quant.c [silk_gains_ID×2, silk_gains_quant×1, silk_gains_dequant×1]
+silk/float/energy_FLP.c -> (none)
+silk/float/find_LPC_FLP.c -> silk/float/LPC_analysis_filter_FLP.c [silk_LPC_analysis_filter_FLP×1]; silk/float/burg_modified_FLP.c [silk_burg_modified_FLP×2]; silk/float/energy_FLP.c [silk_energy_FLP×2]; silk/float/wrappers_FLP.c [silk_A2NLSF_FLP×2, silk_NLSF2A_FLP×1]; silk/interpolate.c [silk_interpolate×1]
+silk/float/find_LTP_FLP.c -> silk/float/corrMatrix_FLP.c [silk_corrVector_FLP×1, silk_corrMatrix_FLP×1]; silk/float/energy_FLP.c [silk_energy_FLP×1]; silk/float/scale_vector_FLP.c [silk_scale_vector_FLP×2]
+silk/float/find_pitch_lags_FLP.c -> silk/float/LPC_analysis_filter_FLP.c [silk_LPC_analysis_filter_FLP×1]; silk/float/apply_sine_window_FLP.c [silk_apply_sine_window_FLP×2]; silk/float/autocorrelation_FLP.c [silk_autocorrelation_FLP×1]; silk/float/bwexpander_FLP.c [silk_bwexpander_FLP×1]; silk/float/k2a_FLP.c [silk_k2a_FLP×1]; silk/float/pitch_analysis_core_FLP.c [silk_pitch_analysis_core_FLP×1]; silk/float/schur_FLP.c [silk_schur_FLP×1]
+silk/float/find_pred_coefs_FLP.c -> silk/float/LTP_analysis_filter_FLP.c [silk_LTP_analysis_filter_FLP×1]; silk/float/LTP_scale_ctrl_FLP.c [silk_LTP_scale_ctrl_FLP×1]; silk/float/find_LPC_FLP.c [silk_find_LPC_FLP×1]; silk/float/find_LTP_FLP.c [silk_find_LTP_FLP×1]; silk/float/residual_energy_FLP.c [silk_residual_energy_FLP×1]; silk/float/scale_copy_vector_FLP.c [silk_scale_copy_vector_FLP×1]; silk/float/wrappers_FLP.c [silk_process_NLSFs_FLP×1, silk_quant_LTP_gains_FLP×1]
+silk/float/inner_product_FLP.c -> (none)
+silk/float/k2a_FLP.c -> (none)
+silk/float/noise_shape_analysis_FLP.c -> silk/fixed/noise_shape_analysis_FIX.c [warped_gain×2]; silk/float/apply_sine_window_FLP.c [silk_apply_sine_window_FLP×2]; silk/float/autocorrelation_FLP.c [silk_autocorrelation_FLP×1]; silk/float/bwexpander_FLP.c [silk_bwexpander_FLP×3]; silk/float/energy_FLP.c [silk_energy_FLP×1]; silk/float/k2a_FLP.c [silk_k2a_FLP×1]; silk/float/schur_FLP.c [silk_schur_FLP×1]; silk/float/warped_autocorrelation_FLP.c [silk_warped_autocorrelation_FLP×1]
+silk/float/pitch_analysis_core_FLP.c -> silk/fixed/pitch_analysis_core_FIX.c [silk_P_Ana_calc_corr_st3×3, silk_P_Ana_calc_energy_st3×3]; silk/float/energy_FLP.c [silk_energy_FLP×6]; silk/float/sort_FLP.c [silk_insertion_sort_decreasing_FLP×1]; silk/resampler_down2.c [silk_resampler_down2×2]; silk/resampler_down2_3.c [silk_resampler_down2_3×1]
+silk/float/process_gains_FLP.c -> silk/gain_quant.c [silk_gains_quant×1]
+silk/float/regularize_correlations_FLP.c -> (none)
+silk/float/residual_energy_FLP.c -> silk/float/LPC_analysis_filter_FLP.c [silk_LPC_analysis_filter_FLP×2]; silk/float/energy_FLP.c [silk_energy_FLP×4]
+silk/float/scale_copy_vector_FLP.c -> (none)
+silk/float/scale_vector_FLP.c -> (none)
+silk/float/schur_FLP.c -> (none)
+silk/float/sort_FLP.c -> (none)
+silk/float/warped_autocorrelation_FLP.c -> (none)
+silk/float/wrappers_FLP.c -> silk/A2NLSF.c [silk_A2NLSF×1]; silk/NLSF2A.c [silk_NLSF2A×1]; silk/process_NLSFs.c [silk_process_NLSFs×1]; silk/quant_LTP_gains.c [silk_quant_LTP_gains×1]
+silk/gain_quant.c -> silk/lin2log.c [silk_lin2log×1]; silk/log2lin.c [silk_log2lin×2]
+silk/init_decoder.c -> silk/CNG.c [silk_CNG_Reset×1]; silk/PLC.c [silk_PLC_Reset×1]
+silk/init_encoder.c -> silk/VAD.c [silk_VAD_Init×1]; silk/lin2log.c [silk_lin2log×1]
+silk/inner_prod_aligned.c -> (none)
+silk/interpolate.c -> (none)
+silk/lin2log.c -> (none)
+silk/log2lin.c -> (none)
+silk/pitch_est_tables.c -> (none)
+silk/process_NLSFs.c -> silk/NLSF2A.c [silk_NLSF2A×2]; silk/NLSF_VQ_weights_laroia.c [silk_NLSF_VQ_weights_laroia×2]; silk/NLSF_encode.c [silk_NLSF_encode×1]; silk/interpolate.c [silk_interpolate×2]
+silk/quant_LTP_gains.c -> silk/lin2log.c [silk_lin2log×2]; silk/log2lin.c [silk_log2lin×1]
+silk/resampler.c -> silk/resampler_private_IIR_FIR.c [silk_resampler_private_IIR_FIR×2]; silk/resampler_private_down_FIR.c [silk_resampler_private_down_FIR×2]; silk/resampler_private_up2_HQ.c [silk_resampler_private_up2_HQ_wrapper×2]
+silk/resampler_down2.c -> (none)
+silk/resampler_down2_3.c -> silk/resampler_private_AR2.c [silk_resampler_private_AR2×1]
+silk/resampler_private_AR2.c -> (none)
+silk/resampler_private_IIR_FIR.c -> silk/resampler_private_up2_HQ.c [silk_resampler_private_up2_HQ×1]
+silk/resampler_private_down_FIR.c -> silk/resampler_private_AR2.c [silk_resampler_private_AR2×1]
+silk/resampler_private_up2_HQ.c -> (none)
+silk/resampler_rom.c -> (none)
+silk/shell_coder.c -> celt/entdec.c [ec_dec_icdf×1]; celt/entenc.c [ec_enc_icdf×1]
+silk/sigm_Q15.c -> (none)
+silk/sort.c -> (none)
+silk/stereo_LR_to_MS.c -> silk/stereo_find_predictor.c [silk_stereo_find_predictor×2]; silk/stereo_quant_pred.c [silk_stereo_quant_pred×5]
+silk/stereo_MS_to_LR.c -> (none)
+silk/stereo_decode_pred.c -> celt/entdec.c [ec_dec_icdf×4]
+silk/stereo_encode_pred.c -> celt/entenc.c [ec_enc_icdf×4]
+silk/stereo_find_predictor.c -> silk/inner_prod_aligned.c [silk_inner_prod_aligned_scale×1]; silk/sum_sqr_shift.c [silk_sum_sqr_shift×2]
+silk/stereo_quant_pred.c -> (none)
+silk/sum_sqr_shift.c -> (none)
+silk/table_LSF_cos.c -> (none)
+silk/tables_LTP.c -> (none)
+silk/tables_NLSF_CB_NB_MB.c -> (none)
+silk/tables_NLSF_CB_WB.c -> (none)
+silk/tables_gain.c -> (none)
+silk/tables_other.c -> (none)
+silk/tables_pitch_lag.c -> (none)
+silk/tables_pulses_per_block.c -> (none)
+src/analysis.c -> src/mlp.c [analysis_compute_dense×2, analysis_compute_gru×1]; src/opus_encoder.c [is_digital_silence×1]
+src/extensions.c -> celt/laplace.c [main×1]
+src/mapping_matrix.c -> (none)
+src/mlp.c -> (none)
+src/mlp_data.c -> (none)
+src/opus.c -> (none)
+src/opus_decoder.c -> celt/celt_decoder.c [celt_decode_with_ec×3, celt_decoder_get_size×1, celt_decoder_init×1, celt_decode_with_ec_dred×1]; celt/entdec.c [ec_dec_bit_logp×2, ec_dec_init×1, ec_dec_uint×1]; silk/dec_API.c [silk_Get_Decoder_Size×2, silk_ResetDecoder×2, silk_LoadOSCEModels×1, silk_InitDecoder×1, silk_Decode×1]; src/extensions.c [opus_extension_iterator_init×2, opus_extension_iterator_find×2]; src/opus.c [opus_packet_get_samples_per_frame×4, opus_packet_parse_impl×2, opus_pcm_soft_clip_impl×1, opus_packet_parse×1]
+src/opus_encoder.c -> celt/celt_encoder.c [celt_encode_with_ec×5, celt_encoder_get_size×1, celt_encoder_init×1]; celt/entenc.c [ec_enc_bit_logp×2, ec_enc_shrink×2, ec_enc_init×1, ec_enc_uint×1, ec_enc_done×1]; celt/mathops.c [celt_sqrt×5, frac_div32×1]; silk/biquad_alt.c [silk_biquad_alt_stride1×1]; silk/enc_API.c [silk_InitEncoder×3, silk_Encode×2, silk_Get_Encoder_Size×1]; silk/lin2log.c [silk_lin2log×3]; silk/log2lin.c [silk_log2lin×1]; src/analysis.c [tonality_analysis_reset×2, tonality_analysis_init×1, tonality_get_info×1, run_analysis×1]; src/repacketizer.c [opus_packet_pad×2, opus_repacketizer_init×1, opus_repacketizer_cat×1, opus_repacketizer_out_range_impl×1, opus_packet_pad_impl×1]
+src/opus_multistream.c -> (none)
+src/opus_multistream_decoder.c -> src/opus.c [opus_packet_parse_impl×1]; src/opus_decoder.c [opus_decoder_get_size×8, opus_decoder_ctl×4, opus_decoder_init×2, opus_decode_native×1, opus_packet_get_nb_samples×1]; src/opus_multistream.c [validate_layout×2, get_left_channel×1, get_right_channel×1, get_mono_channel×1]
+src/opus_multistream_encoder.c -> celt/bands.c [compute_band_energies×1]; celt/celt.c [resampling_factor×1]; celt/celt_encoder.c [celt_preemphasis×1]; celt/mathops.c [isqrt32×1]; celt/quant_bands.c [amp2Log2×1]; src/opus_encoder.c [opus_encoder_ctl×21, opus_encoder_init×12, opus_encoder_get_size×2, frame_size_select×1, opus_encode_native×1]; src/opus_multistream.c [get_left_channel×2, get_right_channel×2, get_mono_channel×2, validate_layout×1]; src/repacketizer.c [opus_repacketizer_init×1, opus_repacketizer_cat×1, opus_repacketizer_get_nb_frames×1, opus_repacketizer_out_range_impl×1]
+src/opus_projection_decoder.c -> src/mapping_matrix.c [mapping_matrix_get_size×2, mapping_matrix_init×1, mapping_matrix_multiply_channel_out_float×1, mapping_matrix_multiply_channel_out_short×1, mapping_matrix_multiply_channel_out_int24×1]; src/opus_multistream_decoder.c [opus_multistream_decode_native×3, opus_multistream_decoder_get_size×1, opus_multistream_decoder_init×1, opus_multistream_decoder_ctl_va_list×1]
+src/opus_projection_encoder.c -> celt/mathops.c [isqrt32×1]; src/mapping_matrix.c [mapping_matrix_init×10, mapping_matrix_get_size×4, mapping_matrix_get_data×1, mapping_matrix_multiply_channel_in_float×1, mapping_matrix_multiply_channel_in_short×1, mapping_matrix_multiply_channel_in_int24×1]; src/opus_multistream_encoder.c [opus_multistream_encoder_get_size×1, opus_multistream_encoder_init×1, opus_multistream_encoder_ctl_va_list×1]
+src/repacketizer.c -> src/extensions.c [opus_packet_extensions_generate×2, opus_packet_extensions_count×1, opus_packet_extensions_parse×1]; src/opus.c [encode_size×3, opus_packet_parse_impl×3, opus_packet_get_samples_per_frame×1]; src/opus_decoder.c [opus_packet_get_nb_frames×1]
+
+# include graph
+celt/bands.c -> bands.h, modes.h, vq.h, cwrs.h, stack_alloc.h, os_support.h, mathops.h, rate.h, quant_bands.h, pitch.h
+celt/celt.c -> os_support.h, mdct.h, celt.h, pitch.h, bands.h, modes.h, entcode.h, quant_bands.h, rate.h, stack_alloc.h, mathops.h, float_cast.h, celt_lpc.h, vq.h, mips/celt_mipsr1.h
+celt/celt_decoder.c -> cpu_support.h, os_support.h, mdct.h, celt.h, pitch.h, bands.h, modes.h, entcode.h, quant_bands.h, rate.h, stack_alloc.h, mathops.h, float_cast.h, celt_lpc.h, vq.h, lpcnet.h, lpcnet_private.h
+celt/celt_encoder.c -> cpu_support.h, os_support.h, mdct.h, celt.h, pitch.h, bands.h, modes.h, entcode.h, quant_bands.h, rate.h, stack_alloc.h, mathops.h, float_cast.h, celt_lpc.h, vq.h
+celt/celt_lpc.c -> celt_lpc.h, stack_alloc.h, mathops.h, pitch.h
+celt/cwrs.c -> os_support.h, cwrs.h, mathops.h, arch.h
+celt/entcode.c -> entcode.h, arch.h
+celt/entdec.c -> os_support.h, arch.h, entdec.h, mfrngcod.h
+celt/entenc.c -> os_support.h, arch.h, entenc.h, mfrngcod.h
+celt/kiss_fft.c -> _kiss_fft_guts.h, arch.h, os_support.h, mathops.h, stack_alloc.h
+celt/laplace.c -> laplace.h, mathops.h
+celt/mathops.c -> float_cast.h, mathops.h
+celt/mdct.c -> mdct.h, kiss_fft.h, _kiss_fft_guts.h, os_support.h, mathops.h, stack_alloc.h, mips/mdct_mipsr1.h
+celt/modes.c -> celt.h, modes.h, rate.h, os_support.h, stack_alloc.h, quant_bands.h, cpu_support.h, static_modes_fixed.h, static_modes_float.h
+celt/pitch.c -> pitch.h, os_support.h, modes.h, stack_alloc.h, mathops.h, celt_lpc.h
+celt/quant_bands.c -> quant_bands.h, laplace.h, os_support.h, arch.h, mathops.h, stack_alloc.h, rate.h
+celt/rate.c -> modes.h, cwrs.h, arch.h, os_support.h, entcode.h, rate.h, quant_bands.h
+celt/vq.c -> mathops.h, cwrs.h, vq.h, arch.h, os_support.h, bands.h, rate.h, pitch.h, SigProc_FIX.h, macros.h
+silk/A2NLSF.c -> SigProc_FIX.h, tables.h
+silk/CNG.c -> main.h, stack_alloc.h
+silk/HP_variable_cutoff.c -> main_FIX.h, main_FLP.h, tuning_parameters.h
+silk/LPC_analysis_filter.c -> SigProc_FIX.h, celt_lpc.h
+silk/LPC_fit.c -> SigProc_FIX.h
+silk/LPC_inv_pred_gain.c -> SigProc_FIX.h, define.h
+silk/LP_variable_cutoff.c -> main.h
+silk/NLSF2A.c -> SigProc_FIX.h, tables.h
+silk/NLSF_VQ.c -> main.h
+silk/NLSF_VQ_weights_laroia.c -> define.h, SigProc_FIX.h
+silk/NLSF_decode.c -> main.h
+silk/NLSF_del_dec_quant.c -> main.h
+silk/NLSF_encode.c -> main.h, stack_alloc.h
+silk/NLSF_stabilize.c -> SigProc_FIX.h
+silk/NLSF_unpack.c -> main.h
+silk/NSQ.c -> main.h, stack_alloc.h, NSQ.h
+silk/NSQ_del_dec.c -> main.h, stack_alloc.h, NSQ.h
+silk/PLC.c -> main.h, stack_alloc.h, PLC.h, lpcnet.h
+silk/VAD.c -> main.h, stack_alloc.h
+silk/VQ_WMat_EC.c -> main.h
+silk/ana_filt_bank_1.c -> SigProc_FIX.h
+silk/biquad_alt.c -> SigProc_FIX.h
+silk/bwexpander.c -> SigProc_FIX.h
+silk/bwexpander_32.c -> SigProc_FIX.h
+silk/check_control_input.c -> main.h, control.h, errors.h
+silk/code_signs.c -> main.h
+silk/control_SNR.c -> main.h, tuning_parameters.h
+silk/control_audio_bandwidth.c -> main.h, tuning_parameters.h
+silk/control_codec.c -> main_FIX.h, main_FLP.h, stack_alloc.h, tuning_parameters.h, pitch_est_defines.h
+silk/debug.c -> debug.h, SigProc_FIX.h
+silk/dec_API.c -> API.h, main.h, stack_alloc.h, os_support.h, osce.h, osce_structs.h, osce_features.h
+silk/decode_core.c -> main.h, stack_alloc.h
+silk/decode_frame.c -> main.h, stack_alloc.h, PLC.h, osce.h
+silk/decode_indices.c -> main.h
+silk/decode_parameters.c -> main.h
+silk/decode_pitch.c -> SigProc_FIX.h, pitch_est_defines.h
+silk/decode_pulses.c -> main.h
+silk/decoder_set_fs.c -> main.h
+silk/enc_API.c -> define.h, API.h, control.h, typedef.h, stack_alloc.h, structs.h, tuning_parameters.h, main_FIX.h, main_FLP.h, dred_encoder.h
+silk/encode_indices.c -> main.h
+silk/encode_pulses.c -> main.h, stack_alloc.h
+silk/fixed/LTP_analysis_filter_FIX.c -> main_FIX.h
+silk/fixed/LTP_scale_ctrl_FIX.c -> main_FIX.h
+silk/fixed/apply_sine_window_FIX.c -> SigProc_FIX.h
+silk/fixed/autocorr_FIX.c -> SigProc_FIX.h, celt_lpc.h
+silk/fixed/burg_modified_FIX.c -> SigProc_FIX.h, define.h, tuning_parameters.h, pitch.h
+silk/fixed/corrMatrix_FIX.c -> main_FIX.h
+silk/fixed/encode_frame_FIX.c -> main_FIX.h, stack_alloc.h, tuning_parameters.h
+silk/fixed/find_LPC_FIX.c -> main_FIX.h, stack_alloc.h, tuning_parameters.h
+silk/fixed/find_LTP_FIX.c -> main_FIX.h, tuning_parameters.h
+silk/fixed/find_pitch_lags_FIX.c -> main_FIX.h, stack_alloc.h, tuning_parameters.h
+silk/fixed/find_pred_coefs_FIX.c -> main_FIX.h, stack_alloc.h
+silk/fixed/k2a_FIX.c -> SigProc_FIX.h
+silk/fixed/k2a_Q16_FIX.c -> SigProc_FIX.h
+silk/fixed/noise_shape_analysis_FIX.c -> main_FIX.h, stack_alloc.h, tuning_parameters.h
+silk/fixed/pitch_analysis_core_FIX.c -> SigProc_FIX.h, pitch_est_defines.h, stack_alloc.h, debug.h, pitch.h
+silk/fixed/process_gains_FIX.c -> main_FIX.h, tuning_parameters.h
+silk/fixed/regularize_correlations_FIX.c -> main_FIX.h
+silk/fixed/residual_energy16_FIX.c -> main_FIX.h
+silk/fixed/residual_energy_FIX.c -> main_FIX.h, stack_alloc.h
+silk/fixed/schur64_FIX.c -> SigProc_FIX.h
+silk/fixed/schur_FIX.c -> SigProc_FIX.h
+silk/fixed/vector_ops_FIX.c -> SigProc_FIX.h, pitch.h
+silk/fixed/warped_autocorrelation_FIX.c -> main_FIX.h, mips/warped_autocorrelation_FIX_mipsr1.h
+silk/float/LPC_analysis_filter_FLP.c -> main_FLP.h
+silk/float/LPC_inv_pred_gain_FLP.c -> SigProc_FIX.h, SigProc_FLP.h, define.h
+silk/float/LTP_analysis_filter_FLP.c -> main_FLP.h
+silk/float/LTP_scale_ctrl_FLP.c -> main_FLP.h
+silk/float/apply_sine_window_FLP.c -> main_FLP.h
+silk/float/autocorrelation_FLP.c -> typedef.h, SigProc_FLP.h
+silk/float/burg_modified_FLP.c -> SigProc_FLP.h, tuning_parameters.h, define.h
+silk/float/bwexpander_FLP.c -> SigProc_FLP.h
+silk/float/corrMatrix_FLP.c -> main_FLP.h
+silk/float/encode_frame_FLP.c -> main_FLP.h, tuning_parameters.h, stack_alloc.h
+silk/float/energy_FLP.c -> SigProc_FLP.h
+silk/float/find_LPC_FLP.c -> define.h, main_FLP.h, tuning_parameters.h
+silk/float/find_LTP_FLP.c -> main_FLP.h, tuning_parameters.h
+silk/float/find_pitch_lags_FLP.c -> main_FLP.h, tuning_parameters.h
+silk/float/find_pred_coefs_FLP.c -> main_FLP.h
+silk/float/inner_product_FLP.c -> SigProc_FLP.h
+silk/float/k2a_FLP.c -> SigProc_FLP.h
+silk/float/noise_shape_analysis_FLP.c -> main_FLP.h, tuning_parameters.h
+silk/float/pitch_analysis_core_FLP.c -> SigProc_FLP.h, SigProc_FIX.h, pitch_est_defines.h, pitch.h
+silk/float/process_gains_FLP.c -> main_FLP.h, tuning_parameters.h
+silk/float/regularize_correlations_FLP.c -> main_FLP.h
+silk/float/residual_energy_FLP.c -> main_FLP.h
+silk/float/scale_copy_vector_FLP.c -> SigProc_FLP.h
+silk/float/scale_vector_FLP.c -> SigProc_FLP.h
+silk/float/schur_FLP.c -> SigProc_FLP.h
+silk/float/sort_FLP.c -> typedef.h, SigProc_FLP.h
+silk/float/warped_autocorrelation_FLP.c -> main_FLP.h
+silk/float/wrappers_FLP.c -> main_FLP.h
+silk/gain_quant.c -> main.h
+silk/init_decoder.c -> main.h, osce.h, structs.h
+silk/init_encoder.c -> main_FIX.h, main_FLP.h, tuning_parameters.h, cpu_support.h, dred_encoder.h
+silk/inner_prod_aligned.c -> SigProc_FIX.h
+silk/interpolate.c -> main.h
+silk/lin2log.c -> SigProc_FIX.h
+silk/log2lin.c -> SigProc_FIX.h
+silk/pitch_est_tables.c -> typedef.h, pitch_est_defines.h
+silk/process_NLSFs.c -> main.h
+silk/quant_LTP_gains.c -> main.h, tuning_parameters.h
+silk/resampler.c -> resampler_private.h
+silk/resampler_down2.c -> SigProc_FIX.h, resampler_rom.h
+silk/resampler_down2_3.c -> SigProc_FIX.h, resampler_private.h, stack_alloc.h
+silk/resampler_private_AR2.c -> SigProc_FIX.h, resampler_private.h
+silk/resampler_private_IIR_FIR.c -> SigProc_FIX.h, resampler_private.h, stack_alloc.h
+silk/resampler_private_down_FIR.c -> SigProc_FIX.h, resampler_private.h, stack_alloc.h
+silk/resampler_private_up2_HQ.c -> SigProc_FIX.h, resampler_private.h
+silk/resampler_rom.c -> resampler_private.h
+silk/shell_coder.c -> main.h
+silk/sigm_Q15.c -> SigProc_FIX.h
+silk/sort.c -> SigProc_FIX.h
+silk/stereo_LR_to_MS.c -> main.h, stack_alloc.h
+silk/stereo_MS_to_LR.c -> main.h
+silk/stereo_decode_pred.c -> main.h
+silk/stereo_encode_pred.c -> main.h
+silk/stereo_find_predictor.c -> main.h
+silk/stereo_quant_pred.c -> main.h
+silk/sum_sqr_shift.c -> SigProc_FIX.h
+silk/table_LSF_cos.c -> tables.h
+silk/tables_LTP.c -> tables.h
+silk/tables_NLSF_CB_NB_MB.c -> tables.h
+silk/tables_NLSF_CB_WB.c -> tables.h
+silk/tables_gain.c -> tables.h
+silk/tables_other.c -> structs.h, define.h, tables.h
+silk/tables_pitch_lag.c -> tables.h
+silk/tables_pulses_per_block.c -> tables.h
+src/analysis.c -> mathops.h, kiss_fft.h, celt.h, modes.h, arch.h, quant_bands.h, analysis.h, mlp.h, stack_alloc.h, float_cast.h
+src/extensions.c -> opus_types.h, opus_defines.h, arch.h, os_support.h, opus_private.h
+src/mapping_matrix.c -> arch.h, float_cast.h, opus_private.h, opus_defines.h, mapping_matrix.h
+src/mlp.c -> opus_types.h, opus_defines.h, arch.h, mlp.h
+src/mlp_data.c -> mlp.h
+src/opus.c -> opus.h, mathops.h, opus_private.h
+src/opus_decoder.c -> celt.h, opus.h, entdec.h, modes.h, API.h, stack_alloc.h, float_cast.h, opus_private.h, os_support.h, structs.h, define.h, mathops.h, cpu_support.h, dred_rdovae_dec_data.h, dred_rdovae_dec.h, osce.h
+src/opus_encoder.c -> celt.h, entenc.h, modes.h, API.h, stack_alloc.h, float_cast.h, opus.h, arch.h, pitch.h, opus_private.h, os_support.h, cpu_support.h, analysis.h, mathops.h, tuning_parameters.h, dred_coding.h, fixed/structs_FIX.h, float/structs_FLP.h
+src/opus_multistream.c -> opus_multistream.h, opus.h, opus_private.h, stack_alloc.h, float_cast.h, os_support.h
+src/opus_multistream_decoder.c -> opus_multistream.h, opus.h, opus_private.h, stack_alloc.h, float_cast.h, os_support.h
+src/opus_multistream_encoder.c -> opus_multistream.h, opus.h, opus_private.h, stack_alloc.h, float_cast.h, os_support.h, mathops.h, mdct.h, modes.h, bands.h, quant_bands.h, pitch.h
+src/opus_projection_decoder.c -> mathops.h, os_support.h, opus_private.h, opus_defines.h, opus_projection.h, opus_multistream.h, mapping_matrix.h, stack_alloc.h
+src/opus_projection_encoder.c -> mathops.h, os_support.h, opus_private.h, opus_defines.h, opus_projection.h, opus_multistream.h, stack_alloc.h, mapping_matrix.h
+src/repacketizer.c -> opus.h, opus_private.h, os_support.h, stack_alloc.h
