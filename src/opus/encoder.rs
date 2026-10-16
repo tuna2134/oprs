@@ -129,9 +129,9 @@ const PSEUDO_SNR_THRESHOLD: f32 = 316.23;
 /// `OPUS_SET_VOICE_RATIO_REQUEST` (`src/opus_private.h`) — not in `ffi.rs`.
 const OPUS_SET_VOICE_RATIO_REQUEST: i32 = 11018;
 /// `OPUS_GET_VOICE_RATIO_REQUEST` (`src/opus_private.h`).
-const OPUS_GET_VOICE_RATIO_REQUEST: i32 = 11019;
+pub(crate) const OPUS_GET_VOICE_RATIO_REQUEST: i32 = 11019;
 /// `OPUS_SET_FORCE_MODE_REQUEST` (`src/opus_private.h`).
-const OPUS_SET_FORCE_MODE_REQUEST: i32 = 11002;
+pub(crate) const OPUS_SET_FORCE_MODE_REQUEST: i32 = 11002;
 
 /// `VARIABLE_HP_MIN_CUTOFF_HZ` (`silk/tuning_parameters.h`).
 const VARIABLE_HP_MIN_CUTOFF_HZ: opus_int = 60;
@@ -2940,6 +2940,52 @@ impl OpusEncoder {
         }
         let celt = celt_encoder_get_size(channels);
         base_size + silk + celt
+    }
+
+    /// `opus_encoder_init(NULL, Fs, channels, application)` — the C idiom (used
+    /// by `src/opus_multistream_encoder.c`) for validating the arguments and
+    /// obtaining the allocation size without creating a state.
+    ///
+    /// Unlike [`OpusEncoder::get_size`] (which is `opus_encoder_get_size()` and
+    /// always passes `48000`/`OPUS_APPLICATION_AUDIO`), this depends on both
+    /// `Fs` and `application`: `OPUS_APPLICATION_RESTRICTED_SILK` drops the CELT
+    /// size, `OPUS_APPLICATION_RESTRICTED_CELT` drops the SILK size, and both
+    /// shrink the delay buffer.  Negative return values are the `OPUS_*` errors
+    /// `opus_encoder_init()` can produce.
+    pub fn opus_encoder_init_size(Fs: opus_int32, channels: i32, application: i32) -> i32 {
+        if !(Fs == 48000 || Fs == 24000 || Fs == 16000 || Fs == 12000 || Fs == 8000)
+            || (channels != 1 && channels != 2)
+            || (application != OPUS_APPLICATION_VOIP
+                && application != OPUS_APPLICATION_AUDIO
+                && application != OPUS_APPLICATION_RESTRICTED_LOWDELAY
+                && application != OPUS_APPLICATION_RESTRICTED_SILK
+                && application != OPUS_APPLICATION_RESTRICTED_CELT)
+        {
+            return OPUS_BAD_ARG;
+        }
+        let mut silkEncSizeBytes = if channels == 1 {
+            SILK_ENCODER_SIZE_1
+        } else {
+            SILK_ENCODER_SIZE_2
+        };
+        silkEncSizeBytes = align(silkEncSizeBytes);
+        if application == OPUS_APPLICATION_RESTRICTED_CELT {
+            silkEncSizeBytes = 0;
+        }
+        let celtEncSizeBytes = if application != OPUS_APPLICATION_RESTRICTED_SILK {
+            celt_encoder_get_size(channels)
+        } else {
+            0
+        };
+        let mut base_size = align(OPUS_ENCODER_STRUCT_SIZE);
+        if application == OPUS_APPLICATION_RESTRICTED_SILK
+            || application == OPUS_APPLICATION_RESTRICTED_CELT
+        {
+            base_size = align(base_size - MAX_ENCODER_BUFFER * 2 * 4);
+        } else if channels == 1 {
+            base_size = align(base_size - MAX_ENCODER_BUFFER * 4);
+        }
+        base_size + silkEncSizeBytes + celtEncSizeBytes
     }
 
     /// `opus_encoder_init()` (`src/opus_encoder.c:190`).

@@ -379,3 +379,70 @@ remaining 15 configurations.
 4. Then `bash compat/scripts/run-acceptance.sh` must report `ACCEPTANCE: BIT-EXACT` (gate 5) with every other gate green.
 
 Useful API notes collected from the porters: `silk_stereo_LR_to_MS` takes the whole `inputBuf` slice; `silk_NSQ`/`silk_NSQ_del_dec` take the whole 2x16 `PredCoef_Q12` array; `celt_encoder` owns its `Box<CELTMode>` and `celt_encoder_init` creates it internally; `celt_encoder_ctl` splits the variadic C call into `&mut i32` plus separate `_analysis`/`_silk_info`/`_energy_mask` entry points; `RESYNTH` is **not** compiled, so the CELT encoder has no dependency on the decoder.
+
+## Multistream (active goal `goal-5afa77b0`, round 1)
+
+**Why:** `audiopus 0.3.0-rc.0` declares a `multistream = []` Cargo feature but ships **no** multistream code — `src/coder/` only has `encoder.rs`/`decoder.rs`, and the only multistream item in the crate is `repacketizer::multistream_packet_pad/unpad` (already ported and bit-exact in `probe_repacketizer`).  So the audiopus-compatible surface is complete (`compat/apicompat` passes for both crates); multistream is the one *practical* gap, implemented here as an extension.
+
+**Porting (in progress by agent `1456efb2`):** `reference/opus-1.6.1/src/opus_multistream.c` (91 lines: `ChannelLayout`, `validate_layout`, `get_{left,right,mono}_channel`) + `opus_multistream_encoder.c` (1363: `surround_analysis`, `*_get_size`, `*_init`, `*_create` and the `surround_*` variants, `opus_multistream_encode_native`, `encode`/`encode24`/`encode_float`, `ctl`, `destroy`) + `opus_multistream_decoder.c` (565: `*_get_size`/`_init`/`_create`, `opus_multistream_decode_native`, `decode`/`decode24`/`decode_float`, `ctl`, `destroy`) → `src/opus/multistream{,_encoder,_decoder}.rs`, verified by the new `compat/c/probe_multistream.c` + `examples/probe_multistream.rs` (`bash compat/scripts/run-probe.sh multistream`) over 3-8 channels, explicit mappings, 5.1/7.1 surround (`mapping_family` 0/1), 2.5-60 ms, 8-48 kHz, VOIP/AUDIO/LOWDELAY, VBR/CBR/CVBR, complexity 0/5/10, DTX/FEC, forced bandwidth, the whole ctl switch, and decoder FEC/loss/`decode_float`/`decode24` plus error return codes.  `reference/lib-ref` exports the 12 `opus_multistream_*` symbols, so the C oracle is available.
+
+**Deliberately out of scope (with reasons), to be stated in the docs/README:**
+* **DRED / LPCNet deep PLC / OSCE / LossGen** — `reference/opus-1.6.1/dnn/` is **470,060 lines**, almost all trained weight tables.  Decoder-side deep PLC / OSCE / blind-BWE is **unreachable** through the audiopus API (its `Decoder` exposes no ctl passthrough: only `new`/`decode`/`decode_float`/`nb_samples`/`last_packet_duration`/`pitch`/`gain`/`set_gain`/`size`).  **DRED is reachable** via the public generic passthrough `Encoder::set_encoder_ctl_request(OPUS_SET_DRED_DURATION_REQUEST, n)`; enabling it produces DRED latents from stubs, so packets would differ from libopus — this must be documented explicitly rather than silently divergent.
+* **projection API** (`mapping_matrix.c`, 997 lines) — not exposed by audiopus either.
+* `OSCE_BWE` blind-BWE DSP — no audiopus API to enable it.
+
+**Known measurable cosmetic difference (left as is deliberately):** `Decoder::size()` / `coder::size()` return the *autotools reference build* layout (191,580 / 200,348) because `probe_opus_decoder` compares `OpusDecoder::get_size` directly against `reference/lib-ref`; audiopus-on-this-machine (meson system libopus) reports 154,828 / 163,596 (the meson config drops the `ENABLE_OSCE_BWE` fields).  No acceptance path compares the value.  Making the *public* `coder::size()` return the system numbers is possible but would disagree with the internal reference-pinned value, so it is left documented instead.
+
+### Multistream round 5 status (files landed and independently verified)
+
+* **Step 1 landed**: `src/opus/multistream.rs` (10,988 bytes) now holds `ChannelLayout` + `validate_layout` + `get_left_channel`/`get_right_channel`/`get_mono_channel` + the `OpusMSEncoder`/`OpusMSDecoder` struct definitions, and `src/opus/mod.rs` declares `pub mod multistream;` with the C→Rust mapping row.  `cargo build --release` is green and the landed module causes no regression (`run-oracle.sh` → `ACCEPTANCE: BIT-EXACT`; `probe_opus_encoder` → `IDENTICAL (2856 lines)`).
+* **Independently verified line-by-line against C** (`reference/opus-1.6.1/src/opus_multistream.c:41-91`): all four ChannelLayout helpers are identical (`max_channel = nb_streams + nb_coupled_streams`, `>255` → 0, `mapping[i] >= max_channel && != 255` → 0; the three `get_*_channel` helpers use `prev<0 ? 0 : prev+1` and the `stream_id*2`, `stream_id*2+1`, `stream_id + nb_coupled_streams` predicates, returning -1 when absent), and `ChannelLayout.mapping` is `[u8; 256]`, so the `255` sentinel is representable.
+* **Ready-made verification assets** (all produced this session, none touching the agent's files):
+  * `compat/tools/ms_oracle.c` + `compat/scripts/multistream-system-check.sh` → `MULTISTREAM BASELINE: OK`: `reference/lib-ref` and the **system libopus 1.6.1** produce identical multistream packets AND decoded PCM for 5 configurations, so reference-build equality implies system-libopus equality.
+  * Reference `enc_fnv`/`dec_fnv` targets for the Rust port (see `compat/out/ms_ref.txt`): cfg 0 6ch/5.1 `5a3f8509f1b9f024`/`c75855ec0f20e5bf`; cfg 1 8ch/7.1 `60cf796ba1425def`/`45c214acb56a8df2`; cfg 2 4ch explicit `365bd0830f316c06`/`fc1a4f53cd07082c`; cfg 3 3ch coupled `ca5b1fb526a75d4a`/`b33d9c9d45080045`; cfg 4 5ch/5.0 `98c185870f05997e`/`7f5ee114a2a7eddf`.
+  * `compat/tools/ms_sizes.c` + `compat/out/ms_sizes_{ref,sys}.txt`: the `get_size` expectation tables.  **Encoder sizes agree between the two libraries; decoder sizes differ** (they embed one `sizeof(OpusDecoder)` per stream, and the meson system build drops the `ENABLE_OSCE_BWE` fields) — the probe links lib-ref, so the port must match the *reference* numbers (consistent with our reference-pinned `OpusDecoder::get_size`).
+
+### Multistream round 8: the Rust decoder is verified bit-exact (independently of the probe)
+
+`bash compat/scripts/multistream-dec-check.sh` → **`MULTISTREAM DECODER: BIT-EXACT (5 configurations)`**.
+
+* `compat/tools/ms_oracle.c` (public API, linked against `reference/lib-ref`) encodes 6ch/5.1, 8ch/7.1, 4ch-explicit, 3ch-coupled and 5ch/5.0 with the oracle's deterministic PCM and (via `MS_TRACE=...`) dumps the packets to `compat/out/ms_trace.bin`; the same tool prints the C `dec_fnv` values.  `examples/ms_dec_check.rs` reads that trace, creates the Rust `OpusMSDecoder` and decodes: all five `dec_fnv` match C exactly (`c75855ec0f20e5bf`, `45c214acb56a8df2`, `fc1a4f53cd07082c`, `b33d9c9d45080045`, `7f5ee114a2a7eddf`, 28800 samples each).  `MS_TRACE` unset leaves the tool's output byte-identical, so the baseline check is unaffected.
+* This verifies the multistream demux / coupled+mono channel distribution path before the Rust encoder exists.  Still to cover there (the agent's `probe_multistream`): FEC (`decode_fec=1`), packet loss (`None`), `decode_float`/`decode24`, malformed packets, decoder ctls.
+* Wiring note: `OpusMSDecoder` is `pub struct` in `src/opus/multistream.rs:233` while its `impl` lives in `src/opus/multistream_decoder.rs` (imported privately), so the type is currently reachable only as `oprs::opus::multistream::OpusMSDecoder`.
+
+### Multistream round 10: BOTH halves are bit-exact (independently verified)
+
+* **`bash compat/scripts/multistream-enc-check.sh` -> `MULTISTREAM ENCODER: BIT-EXACT (5 configurations)`.**  `compat/tools/ms_oracle.c` (C, linked against `reference/lib-ref`) and `examples/ms_enc_check.rs` (Rust port, identical PCM/ctls) produce **byte-identical packets** for 6ch/5.1, 8ch/7.1, 4ch-explicit, 3ch-coupled and 5ch/5.0: `enc_fnv` `5a3f8509f1b9f024` / `60cf796ba1425def` / `365bd0830f316c06` / `ca5b1fb526a75d4a` / `98c185870f05997e`, with `enc_bytes` 8768 / 10096 / 4702 / 3493 / 6059 all equal.  This covers `opus_multistream_surround_encoder_create` (mapping/streams/coupled computation), `surround_analysis`, the per-stream `OpusEncoder` fan-out and the shared range coder.
+* **`bash compat/scripts/multistream-dec-check.sh` -> `MULTISTREAM DECODER: BIT-EXACT (5 configurations)`** (round 8): the Rust decoder reproduces the C decoded PCM exactly for the same five configurations (`c75855ec0f20e5bf`, `45c214acb56a8df2`, `fc1a4f53cd07082c`, `b33d9c9d45080045`, `7f5ee114a2a7eddf`).
+* **No regression** from adding the modules: `run-oracle.sh` -> `ACCEPTANCE: BIT-EXACT` (16 configurations), `probe_opus_encoder` -> `IDENTICAL (2856 lines)`.
+* `bash compat/scripts/run-acceptance.sh` now also runs the multistream baseline + encoder + decoder checks as gates.
+* Remaining for the goal: the full `compat/c/probe_multistream.c` + `examples/probe_multistream.rs` matrix (2.5-60 ms, VBR/CBR/CVBR, DTX, FEC, decoder FEC/loss, malformed packets, the whole ctl switch, error return codes), unit tests, and the final green `run-acceptance.sh` with the new probe as #25.
+
+### Multistream round 13: the independent checks now cover CBR / DTX / FEC (8 configurations)
+
+`compat/tools/ms_oracle.c` and `examples/ms_enc_check.rs` were extended with three more configurations and the matching ctls (`OPUS_SET_VBR`, `OPUS_SET_DTX`, `OPUS_SET_INBAND_FEC`, `OPUS_SET_PACKET_LOSS_PERC`); the two check scripts no longer truncate to the first five rows:
+
+* `MULTISTREAM ENCODER: BIT-EXACT (8 configurations)` — 6ch/5.1 CBR 64k (VBR off), 6ch/5.1 DTX VOIP 32k, 8ch/7.1 in-band FEC + 20 % packet loss, on top of the original five.
+* `MULTISTREAM DECODER: BIT-EXACT (8 configurations)` — the Rust decoder reproduces C's PCM for those packets too (including DTX packets and FEC/LBRR-bearing packets).
+* `MULTISTREAM BASELINE: OK` — and the **system libopus 1.6.1 agrees with the reference build on all 8** (packets + decoded PCM), so the CBR/DTX/FEC multistream paths are covered by the reference-vs-system equivalence as well.
+* Remaining coverage to come from the agent's `probe_multistream`: frame sizes 2.5-60 ms (the independent checks use 20 ms), CVBR, forced bandwidth, decoder `decode_fec=1` recovery and `NULL`-packet concealment, malformed packets, the full ctl switch and error return codes.
+
+### Multistream goal COMPLETE (round 19) — final acceptance
+
+`bash compat/scripts/run-acceptance.sh` -> **`ACCEPTANCE SUITE: all gates passed`** (exit 0):
+
+```
+-- cargo build --release: OK
+-- cargo test --lib --release: OK            (315 passed)
+-- all C-vs-Rust probes: OK                  (all 25 probes bit-exact, incl. probe_multistream: IDENTICAL (1754 lines))
+-- decoded-PCM half (16 configurations): OK  (BIT-EXACT)
+-- multistream baseline (reference build == system libopus): OK
+-- multistream encoder vs C reference: OK     (BIT-EXACT, 8 configurations)
+-- multistream decoder vs C packets: OK       (BIT-EXACT, 8 configurations)
+-- ACCEPTANCE: 16-configuration oracle diff: OK  (BIT-EXACT)
+ACCEPTANCE SUITE: all gates passed.
+```
+
+* `probe_multistream` (new, C+Rust): 68-config row table + `get_size`/error paths + `msctl` + decoder FEC/PLC/float/int24/get_state + malformed inputs, `IDENTICAL (1754 lines)`.  The C side was verified deterministic (two runs identical) before the Rust twin landed.
+* **One follow-up defect fixed in the harness**: `multistream-system-check.sh` step 2 compared the probe output between the reference build and the system libopus byte-for-byte, which fails only on the `decg …` lines — `opus_multistream_decoder_get_size()` embeds one `sizeof(OpusDecoder)` per stream, and the installed meson libopus drops the `ENABLE_OSCE_BWE` fields (ref 191,856 vs system 155,104 for 1 stream), exactly the divergence already documented for the single-stream `size()`.  Step 2 now filters only those 37 `decg` size lines and reports them as the documented difference; every behavioural line must still agree.  (Found by the porting agent, not by me: my earlier confirmation had suppressed stderr.)
+* `run-acceptance.sh`'s probe-gate label was corrected from "23 C-vs-Rust probes" to "all C-vs-Rust probes" (the count is 25).

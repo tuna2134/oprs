@@ -8,6 +8,8 @@
 //! | `src/opus_decoder.c` | `src/opus/decoder.rs` |
 //! | `src/opus_encoder.c` | `src/opus/encoder.rs` |
 //! | `src/opus_multistream.c` | `src/opus/multistream.rs` |
+//! | `src/opus_multistream_encoder.c` | `src/opus/multistream_encoder.rs` |
+//! | `src/opus_multistream_decoder.c` | `src/opus/multistream_decoder.rs` |
 //! | `src/opus_projection*.c` | `src/opus/projection.rs` |
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
@@ -21,6 +23,8 @@ pub mod repacketizer;
 pub mod decoder;
 pub mod encoder;
 pub mod multistream;
+pub mod multistream_encoder;
+pub mod multistream_decoder;
 pub mod projection;
 
 /// `opus_get_version_string()` (in C this lives in `src/opus.c`).

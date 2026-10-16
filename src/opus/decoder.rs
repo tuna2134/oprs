@@ -1170,7 +1170,7 @@ fn opus_decode_frame(
 /// mirror the C arguments; the ported entry points only ever pass
 /// `self_delimited == 0`, `packet_offset == None`, `dred == None`.
 #[allow(clippy::too_many_arguments)]
-fn opus_decode_native(
+pub(crate) fn opus_decode_native(
     st: &mut OpusDecoder,
     data: Option<&[u8]>,
     len: i32,
