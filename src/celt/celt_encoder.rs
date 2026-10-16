@@ -68,6 +68,7 @@ use super::bands::{
 use super::celt::{
     comb_filter, init_caps, resampling_factor, spread_icdf, tapset_icdf, tf_select_table, toOpus,
     trim_icdf, AnalysisInfo, SILKInfo, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD,
+    MAX_CELT_FRAME, MAX_CELT_OVERLAP, MAX_CHANNELS, MAX_NB_EBANDS, MAX_PVQ_N,
 };
 use super::entcode::{ec_ctx, ec_tell_frac, BITRES, EC_ILOG};
 use super::entenc::{
@@ -801,7 +802,10 @@ fn transient_analysis(
         4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2,
     ];
 
-    let mut tmp = vec![0.0f32; len as usize];
+    /* `VARDECL(opus_val16, tmp); ALLOC(tmp, len, opus_val16);` — `len` is at
+       most `N+overlap` (`MAX_CELT_FRAME + MAX_CELT_OVERLAP`), stack storage. */
+    let mut tmp_storage = [0.0f32; MAX_CELT_FRAME + MAX_CELT_OVERLAP];
+    let tmp = &mut tmp_storage[..len as usize];
     let mut is_transient;
     let mut mask_metric: opus_int32 = 0;
     let mut forward_decay = QCONST16(0.0625f32, 15);
@@ -1004,13 +1008,22 @@ fn tf_analysis(
     tf_chan: i32,
     importance: &[i32],
 ) -> i32 {
-    let mut metric = vec![0i32; len as usize];
+    /* `VARDECL(int, metric)`, `VARDECL(int, path0/path1)`: `len` is at most
+       `mode->nbEBands` (`MAX_NB_EBANDS`).  `VARDECL(celt_norm, tmp/tmp_1)`:
+       `(eBands[len]-eBands[len-1])<<LM` is at most the mode's largest band,
+       which `opus_custom_mode_create()` caps at `MAX_PVQ_N`.  Stack storage. */
+    let mut metric_storage = [0i32; MAX_NB_EBANDS];
+    let metric = &mut metric_storage[..len as usize];
     let tmp_len = (((m.eBands[len as usize] as i32) - (m.eBands[(len - 1) as usize] as i32)) << LM)
         as usize;
-    let mut tmp = vec![0.0f32 as celt_norm; tmp_len];
-    let mut tmp_1 = vec![0.0f32 as celt_norm; tmp_len];
-    let mut path0 = vec![0i32; len as usize];
-    let mut path1 = vec![0i32; len as usize];
+    let mut tmp_storage = [0.0f32; MAX_PVQ_N];
+    let tmp = &mut tmp_storage[..tmp_len];
+    let mut tmp_1_storage = [0.0f32; MAX_PVQ_N];
+    let tmp_1 = &mut tmp_1_storage[..tmp_len];
+    let mut path0_storage = [0i32; MAX_NB_EBANDS];
+    let path0 = &mut path0_storage[..len as usize];
+    let mut path1_storage = [0i32; MAX_NB_EBANDS];
+    let path1 = &mut path1_storage[..len as usize];
     let mut selcost = [0i32; 2];
     let mut tf_select = 0i32;
 
@@ -1436,9 +1449,14 @@ fn dynalloc_analysis(
     let mut c;
     let mut tot_boost: opus_int32 = 0;
     let mut maxDepth: celt_glog;
-    let mut follower = vec![0.0f32 as celt_glog; (C * nbEBands) as usize];
-    let mut noise_floor = vec![0.0f32 as celt_glog; (C * nbEBands) as usize];
-    let mut bandLogE3 = vec![0.0f32 as celt_glog; nbEBands as usize];
+    /* `VARDECL(celt_glog, follower/noise_floor)` are `C*nbEBands` and
+       `VARDECL(celt_glog, bandLogE3)` is `nbEBands`: stack storage. */
+    let mut follower_storage = [0.0f32; MAX_CHANNELS * MAX_NB_EBANDS];
+    let follower = &mut follower_storage[..(C * nbEBands) as usize];
+    let mut noise_floor_storage = [0.0f32; MAX_CHANNELS * MAX_NB_EBANDS];
+    let noise_floor = &mut noise_floor_storage[..(C * nbEBands) as usize];
+    let mut bandLogE3_storage = [0.0f32; MAX_NB_EBANDS];
+    let bandLogE3 = &mut bandLogE3_storage[..nbEBands as usize];
     for v in offsets[..nbEBands as usize].iter_mut() {
         *v = 0;
     }
@@ -1466,8 +1484,11 @@ fn dynalloc_analysis(
     {
         /* Compute a really simple masking model to avoid taking into account completely masked
            bands when computing the spreading decision. */
-        let mut mask = vec![0.0f32 as celt_glog; nbEBands as usize];
-        let mut sig = vec![0.0f32 as celt_glog; nbEBands as usize];
+        /* `VARDECL(celt_glog, mask/sig); ALLOC(..., nbEBands, ...)` — stack. */
+        let mut mask_storage = [0.0f32; MAX_NB_EBANDS];
+        let mask = &mut mask_storage[..nbEBands as usize];
+        let mut sig_storage = [0.0f32; MAX_NB_EBANDS];
+        let sig = &mut sig_storage[..nbEBands as usize];
         for i in 0..end {
             mask[i as usize] = bandLogE[i as usize] - noise_floor[i as usize];
         }
@@ -1778,7 +1799,10 @@ fn tone_detect(
     let mut fail;
     let mut lpc = [0.0f32 as opus_val32; 2];
     let freq;
-    let mut x = vec![0.0f32 as opus_val16; N as usize];
+    /* `VARDECL(opus_val16, x); ALLOC(x, N, opus_val16);` — `N` is `N+overlap`
+       at the call site, so at most `MAX_CELT_FRAME + MAX_CELT_OVERLAP`. */
+    let mut x_storage = [0.0f32; MAX_CELT_FRAME + MAX_CELT_OVERLAP];
+    let x = &mut x_storage[..N as usize];
     /* Shift by SIG_SHIFT+2 (+3 for stereo) to account for HF gain of the preemphasis filter. */
     if CC == 2 {
         for i in 0..N as usize {
@@ -1850,7 +1874,10 @@ fn run_prefilter(
     let max_period = COMBFILTER_MAXPERIOD;
     let min_period = COMBFILTER_MINPERIOD;
     let overlap = mode.overlap;
-    let mut _pre = vec![0.0f32 as celt_sig; (CC * (N + max_period)) as usize];
+    /* `VARDECL(celt_sig, _pre); ALLOC(_pre, CC*(N+max_period), celt_sig);`
+       with `max_period == COMBFILTER_MAXPERIOD` — stack storage. */
+    let mut pre_storage = [0.0f32; MAX_CHANNELS * (MAX_CELT_FRAME + COMBFILTER_MAXPERIOD as usize)];
+    let _pre = &mut pre_storage[..(CC * (N + max_period)) as usize];
     let pre_len = (N + max_period) as usize;
 
     for c in 0..CC as usize {
@@ -1893,12 +1920,15 @@ fn run_prefilter(
         gain1 = QCONST16(0.75f32, 15);
     } else if enabled != 0 && complexity >= 5 {
         let plen = ((max_period + N) >> 1) as usize;
-        let mut pitch_buf = vec![0.0f32 as opus_val16; plen];
+        /* `VARDECL(opus_val16, pitch_buf); ALLOC(pitch_buf,
+           (max_period+N)>>1, opus_val16);` — stack storage. */
+        let mut pitch_buf_storage = [0.0f32; (COMBFILTER_MAXPERIOD as usize + MAX_CELT_FRAME) >> 1];
+        let pitch_buf = &mut pitch_buf_storage[..plen];
 
         let views: [&[celt_sig]; 2] = [&_pre[0..], &_pre[pre_len..]];
         pitch_downsample(
             &views[..CC as usize],
-            &mut pitch_buf,
+            pitch_buf,
             (max_period + N) >> 1,
             CC,
             2,
@@ -2342,7 +2372,6 @@ pub fn celt_encode_with_ec(
     let enable_tf_analysis: i32;
     let mut tone_freq: opus_val16 = -1.0;
     let mut toneishness: opus_val32 = 0.0;
-    let mut surround_dynalloc: Vec<celt_glog>;
 
     let packet_size_cap: i32 = 1275;
     let mut frame_size = frame_size;
@@ -2485,7 +2514,9 @@ pub fn celt_encode_with_ec(
         effEnd = mode.effEBands;
     }
 
-    let mut in_ = vec![0.0f32 as celt_sig; (CC * (N + overlap)) as usize];
+    /* `VARDECL(celt_sig, in); ALLOC(in, CC*(N+overlap), celt_sig);` — stack. */
+    let mut in_storage = [0.0f32; MAX_CHANNELS * (MAX_CELT_FRAME + MAX_CELT_OVERLAP)];
+    let mut in_ = &mut in_storage[..(CC * (N + overlap)) as usize];
 
     sample_max = MAX32(
         st.overlap_max,
@@ -2638,12 +2669,18 @@ pub fn celt_encode_with_ec(
         transient_got_disabled = 1;
     }
 
-    let mut freq = vec![0.0f32 as celt_sig; (CC * N) as usize]; /* Interleaved signal MDCTs */
-    let mut bandE = vec![0.0f32 as celt_ener; (nbEBands * CC) as usize];
-    let mut bandLogE = vec![0.0f32 as celt_glog; (nbEBands * CC) as usize];
+    /* `VARDECL(celt_sig, freq)`, `VARDECL(celt_ener, bandE)` and the
+       `celt_glog` arrays: `CC*N` / `nbEBands*CC` / `C*nbEBands` — stack. */
+    let mut freq_storage = [0.0f32; MAX_CHANNELS * MAX_CELT_FRAME];
+    let mut freq = &mut freq_storage[..(CC * N) as usize]; /* Interleaved signal MDCTs */
+    let mut bandE_storage = [0.0f32; MAX_NB_EBANDS * MAX_CHANNELS];
+    let mut bandE = &mut bandE_storage[..(nbEBands * CC) as usize];
+    let mut bandLogE_storage = [0.0f32; MAX_NB_EBANDS * MAX_CHANNELS];
+    let mut bandLogE = &mut bandLogE_storage[..(nbEBands * CC) as usize];
 
     secondMdct = (shortBlocks != 0 && st.complexity >= 8) as i32;
-    let mut bandLogE2 = vec![0.0f32 as celt_glog; (C * nbEBands) as usize];
+    let mut bandLogE2_storage = [0.0f32; MAX_CHANNELS * MAX_NB_EBANDS];
+    let mut bandLogE2 = &mut bandLogE2_storage[..(C * nbEBands) as usize];
     if secondMdct != 0 {
         compute_mdcts(mode, 0, &in_, &mut freq, C, CC, LM, st.upsample, st.arch);
         compute_band_energies(mode, &freq, &mut bandE, effEnd, C, LM, st.arch);
@@ -2674,7 +2711,9 @@ pub fn celt_encode_with_ec(
     }
     amp2Log2(mode, effEnd, end, &bandE, &mut bandLogE, C);
 
-    surround_dynalloc = vec![0.0f32 as celt_glog; (C * nbEBands) as usize];
+    /* `VARDECL(celt_glog, surround_dynalloc); ALLOC(..., C*nbEBands, ...)`. */
+    let mut surround_dynalloc_storage = [0.0f32; MAX_CHANNELS * MAX_NB_EBANDS];
+    let mut surround_dynalloc = &mut surround_dynalloc_storage[..(C * nbEBands) as usize];
     for v in surround_dynalloc[..end as usize].iter_mut() {
         *v = 0.0;
     }
@@ -2823,7 +2862,9 @@ pub fn celt_encode_with_ec(
         ec_enc_bit_logp(enc, isTransient, 3);
     }
 
-    let mut X = vec![0.0f32 as celt_norm; (C * N) as usize]; /* Interleaved normalised MDCTs */
+    /* `VARDECL(celt_norm, X); ALLOC(X, C*N, celt_norm);` — stack storage. */
+    let mut X_storage = [0.0f32; MAX_CHANNELS * MAX_CELT_FRAME];
+    let mut X = &mut X_storage[..(C * N) as usize]; /* Interleaved normalised MDCTs */
 
     /* Band normalisation */
     normalise_bands(mode, &freq, &mut X, &bandE, effEnd, C, M);
@@ -2834,9 +2875,13 @@ pub fn celt_encode_with_ec(
         && st.lfe == 0
         && toneishness < QCONST32(0.98f32, 29)) as i32;
 
-    let mut offsets = vec![0i32; nbEBands as usize];
-    let mut importance = vec![0i32; nbEBands as usize];
-    let mut spread_weight = vec![0i32; nbEBands as usize];
+    /* `VARDECL(int, offsets/importance/spread_weight); ALLOC(..., nbEBands, int)`. */
+    let mut offsets_storage = [0i32; MAX_NB_EBANDS];
+    let mut offsets = &mut offsets_storage[..nbEBands as usize];
+    let mut importance_storage = [0i32; MAX_NB_EBANDS];
+    let mut importance = &mut importance_storage[..nbEBands as usize];
+    let mut spread_weight_storage = [0i32; MAX_NB_EBANDS];
+    let mut spread_weight = &mut spread_weight_storage[..nbEBands as usize];
 
     maxDepth = dynalloc_analysis(
         &bandLogE,
@@ -2865,7 +2910,9 @@ pub fn celt_encode_with_ec(
         toneishness,
     );
 
-    let mut tf_res = vec![0i32; nbEBands as usize];
+    /* `VARDECL(int, tf_res); ALLOC(tf_res, nbEBands, int)`. */
+    let mut tf_res_storage = [0i32; MAX_NB_EBANDS];
+    let mut tf_res = &mut tf_res_storage[..nbEBands as usize];
     /* Disable variable tf resolution for hybrid and at very low bitrate */
     if enable_tf_analysis != 0 {
         let lambda: i32;
@@ -2906,7 +2953,9 @@ pub fn celt_encode_with_ec(
         tf_select = 0;
     }
 
-    let mut error = vec![0.0f32 as celt_glog; (C * nbEBands) as usize];
+    /* `VARDECL(celt_glog, error); ALLOC(error, C*nbEBands, celt_glog)`. */
+    let mut error_storage = [0.0f32; MAX_CHANNELS * MAX_NB_EBANDS];
+    let mut error = &mut error_storage[..(C * nbEBands) as usize];
     c = 0;
     loop {
         for i in start..end {
@@ -2994,7 +3043,9 @@ pub fn celt_encode_with_ec(
     if st.lfe != 0 {
         offsets[0] = IMIN(8, effectiveBytes / 3);
     }
-    let mut cap = vec![0i32; nbEBands as usize];
+    /* `VARDECL(int, cap); ALLOC(cap, nbEBands, int)`. */
+    let mut cap_storage = [0i32; MAX_NB_EBANDS];
+    let mut cap = &mut cap_storage[..nbEBands as usize];
     init_caps(mode, &mut cap, LM, C);
 
     dynalloc_logp = 6;
@@ -3222,9 +3273,13 @@ pub fn celt_encode_with_ec(
     }
 
     /* Bit allocation */
-    let mut fine_quant = vec![0i32; nbEBands as usize];
-    let mut pulses = vec![0i32; nbEBands as usize];
-    let mut fine_priority = vec![0i32; nbEBands as usize];
+    /* `VARDECL(int, fine_quant/pulses/fine_priority)`, `nbEBands` each. */
+    let mut fine_quant_storage = [0i32; MAX_NB_EBANDS];
+    let mut fine_quant = &mut fine_quant_storage[..nbEBands as usize];
+    let mut pulses_storage = [0i32; MAX_NB_EBANDS];
+    let mut pulses = &mut pulses_storage[..nbEBands as usize];
+    let mut fine_priority_storage = [0i32; MAX_NB_EBANDS];
+    let mut fine_priority = &mut fine_priority_storage[..nbEBands as usize];
 
     /* bits =           packet size                    - where we are - safety*/
     bits = (((nbCompressedBytes * 8) as opus_int32) << BITRES) - (ec_tell_frac(enc) as opus_int32) - 1;
@@ -3287,7 +3342,9 @@ pub fn celt_encode_with_ec(
     }
 
     /* Residual quantisation */
-    let mut collapse_masks = vec![0u8; (C * nbEBands) as usize];
+    /* `VARDECL(unsigned char, collapse_masks); ALLOC(..., C*nbEBands, ...)`. */
+    let mut collapse_masks_storage = [0u8; MAX_CHANNELS * MAX_NB_EBANDS];
+    let mut collapse_masks = &mut collapse_masks_storage[..(C * nbEBands) as usize];
     {
         let (x0, x1) = X.split_at_mut(N as usize);
         let y = if C == 2 { Some(x1) } else { None };
@@ -3448,7 +3505,10 @@ pub fn opus_custom_encode(
 
     C = st.channels;
     N = frame_size;
-    let mut in_ = vec![0.0f32 as opus_res; (C * N) as usize];
+    /* `VARDECL(opus_res, in); ALLOC(in, C*N, opus_res);` — stack storage
+       (`C <= MAX_CHANNELS`, `N <= MAX_CELT_FRAME`). */
+    let mut in_storage = [0.0f32; MAX_CHANNELS * MAX_CELT_FRAME];
+    let mut in_ = &mut in_storage[..(C * N) as usize];
 
     for j in 0..(C * N) as usize {
         in_[j] = INT16TORES(pcm[j]);
@@ -3477,7 +3537,9 @@ pub fn opus_custom_encode24(
 
     C = st.channels;
     N = frame_size;
-    let mut in_ = vec![0.0f32 as opus_res; (C * N) as usize];
+    /* `VARDECL(opus_res, in); ALLOC(in, C*N, opus_res);` — stack storage. */
+    let mut in_storage = [0.0f32; MAX_CHANNELS * MAX_CELT_FRAME];
+    let mut in_ = &mut in_storage[..(C * N) as usize];
 
     for j in 0..(C * N) as usize {
         in_[j] = INT24TORES(pcm[j]);

@@ -97,6 +97,45 @@ pub const COMBFILTER_MAXPERIOD: i32 = 1024;
 /// `COMBFILTER_MINPERIOD` (`celt/celt.h`).
 pub const COMBFILTER_MINPERIOD: i32 = 15;
 
+/* ------------------------------------------------------------------------- *
+ * Compile-time bounds replacing the C `VARDECL`/`ALLOC` sizes.
+ *
+ * The C declares its per-frame temporaries with `VARDECL`/`ALLOC`, which are
+ * `alloca`-style *stack* allocations sized by run-time mode/frame values, so a
+ * C frame allocates nothing on the heap.  Rust has no `alloca`, so the port
+ * uses fixed-size stack arrays; the constants below are the proven maxima of
+ * the C run-time sizes and are used only as array lengths (the code still
+ * slices them down to the exact C size, so no arithmetic changes).
+ * ------------------------------------------------------------------------- */
+
+/// Upper bound on the CELT frame size `N = mode->shortMdctSize << LM`.
+///
+/// Without `ENABLE_QEXT`, `opus_custom_mode_create()` rejects
+/// `frame_size > 1024`, and `celt_encode_with_ec()` only accepts the frame
+/// sizes `mode->shortMdctSize << LM` with `LM <= mode->maxLM`, i.e. at most
+/// the frame size the mode was created with.
+pub const MAX_CELT_FRAME: usize = 1024;
+
+/// Upper bound on `mode->overlap` (`= (shortMdctSize>>2)<<2`, `celt/modes.c`):
+/// the mode creator requires `shortMdctSize*300 <= Fs` and `Fs <= 96000`, so
+/// `overlap <= shortMdctSize <= 320`.
+pub const MAX_CELT_OVERLAP: usize = 320;
+
+/// Upper bound on `mode->nbEBands`.  `compute_ebands()` (`celt/modes.c`)
+/// returns `low+high` where `high = nBark-lin <= BARK_BANDS-lin` and, because
+/// `bark_freq[lin] < lin*res` for the first `lin` with a spacing `>= res`,
+/// `low <= lin`; hence `nbEBands <= BARK_BANDS == 25`.
+pub const MAX_NB_EBANDS: usize = 25;
+
+/// `MAX_CHANNELS` (`celt/celt.h`) — every CELT allocation here is `C`/`CC`
+/// wide.
+pub const MAX_CHANNELS: usize = 2;
+
+/// Upper bound on one PVQ band, `(eBands[nbEBands]-eBands[nbEBands-1])<<LM`.
+/// Without `SMALL_FOOTPRINT`, `opus_custom_mode_create()` rejects any mode
+/// whose largest band (`<< maxLM`) exceeds 208.
+pub const MAX_PVQ_N: usize = 208;
+
 /* Encoder/decoder requests (`celt/celt.h`).  The C code spells the
    function-like macros (`CELT_SET_PREDICTION(x)`, ...) as a request id
    followed by a checked argument; only the ids are meaningful in Rust. */

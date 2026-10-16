@@ -65,6 +65,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use super::arch::*;
+use super::celt::{MAX_CELT_FRAME, MAX_CHANNELS, MAX_PVQ_N};
 use super::entcode::{celt_sudiv, celt_udiv, ec_ctx, BITRES};
 use super::entdec::{ec_dec_bit_logp, ec_dec_bits, ec_dec_uint, ec_decode, ec_dec_update};
 use super::entenc::{ec_encode, ec_enc_bit_logp, ec_enc_bits, ec_enc_uint};
@@ -540,7 +541,17 @@ pub fn deinterleave_hadamard(X: &mut [celt_norm], N0: i32, stride: i32, hadamard
     let i: i32;
     let j: i32;
     let N: i32 = N0 * stride;
-    let mut tmp = vec![0.0f32 as celt_norm; N as usize];
+    /* `VARDECL(celt_norm, tmp); ALLOC(tmp, N, celt_norm);` — `N` is one PVQ
+       band in `quant_band`, so `MAX_PVQ_N` covers the codec; the `bands` probe
+       calls this directly for `N` up to 512 and falls back to the heap. */
+    let mut tmp_heap: Vec<celt_norm> = Vec::new();
+    let mut tmp_storage = [0.0f32; MAX_PVQ_N];
+    let tmp: &mut [celt_norm] = if N as usize <= MAX_PVQ_N {
+        &mut tmp_storage[..N as usize]
+    } else {
+        tmp_heap.resize(N as usize, 0.0);
+        tmp_heap.as_mut_slice()
+    };
     celt_assert!(stride > 0);
     if hadamard != 0 {
         let ordery_off = (stride - 2) as usize;
@@ -565,7 +576,17 @@ pub fn interleave_hadamard(X: &mut [celt_norm], N0: i32, stride: i32, hadamard: 
     let i: i32;
     let j: i32;
     let N: i32 = N0 * stride;
-    let mut tmp = vec![0.0f32 as celt_norm; N as usize];
+    /* `VARDECL(celt_norm, tmp); ALLOC(tmp, N, celt_norm);` — `N` is one PVQ
+       band in `quant_band`, so `MAX_PVQ_N` covers the codec; the `bands` probe
+       calls this directly for `N` up to 512 and falls back to the heap. */
+    let mut tmp_heap: Vec<celt_norm> = Vec::new();
+    let mut tmp_storage = [0.0f32; MAX_PVQ_N];
+    let tmp: &mut [celt_norm] = if N as usize <= MAX_PVQ_N {
+        &mut tmp_storage[..N as usize]
+    } else {
+        tmp_heap.resize(N as usize, 0.0);
+        tmp_heap.as_mut_slice()
+    };
     if hadamard != 0 {
         let ordery_off = (stride - 2) as usize;
         for i in 0..stride {
@@ -1583,7 +1604,12 @@ pub fn quant_all_bands(
        like `norm2 = norm + M*eBands[nbEBands-1]-norm_offset`. */
     let norm_span: i32 = M * eBands[m.nbEBands as usize - 1] as i32 - norm_offset;
     let norm_alloc: i32 = C * norm_span;
-    let mut _norm = vec![0.0f32 as celt_norm; norm_alloc as usize];
+    /* `VARDECL(celt_norm, _norm); ALLOC(_norm, C*norm_span, celt_norm);`:
+       `norm_span <= M*shortMdctSize == N <= MAX_CELT_FRAME`, so this is the
+       first half of that C allocation and `norm2` the second, exactly as the
+       C pointer arithmetic `norm2 = norm + norm_span`. */
+    let mut norm_storage = [0.0f32; MAX_CHANNELS * MAX_CELT_FRAME];
+    let _norm = &mut norm_storage[..norm_alloc as usize];
     let norm: *mut celt_norm = _norm.as_mut_ptr();
     let norm2: *mut celt_norm = unsafe { norm.add(norm_span as usize) };
 
@@ -1606,12 +1632,22 @@ pub fn quant_all_bands(
         md
     };
     let resynth_alloc: i32 = M * max_diff;
-    let mut _lowband_scratch = vec![0.0f32 as celt_norm; resynth_alloc as usize];
-    let mut _x_save = vec![0.0f32 as celt_norm; resynth_alloc as usize];
-    let mut _y_save = vec![0.0f32 as celt_norm; resynth_alloc as usize];
-    let mut _x_save2 = vec![0.0f32 as celt_norm; resynth_alloc as usize];
-    let mut _y_save2 = vec![0.0f32 as celt_norm; resynth_alloc as usize];
-    let mut _norm_save2 = vec![0.0f32 as celt_norm; resynth_alloc as usize];
+    /* `VARDECL(celt_norm, _lowband_scratch/X_save/Y_save/X_save2/Y_save2/
+       norm_save2); ALLOC(..., resynth_alloc, ...)` — `resynth_alloc <= N`
+       because every band is at most the last one and
+       `eBands[nbEBands] <= shortMdctSize`, so all six are stack arrays. */
+    let mut lowband_scratch_storage = [0.0f32; MAX_CELT_FRAME];
+    let _lowband_scratch = &mut lowband_scratch_storage[..resynth_alloc as usize];
+    let mut x_save_storage = [0.0f32; MAX_CELT_FRAME];
+    let _x_save = &mut x_save_storage[..resynth_alloc as usize];
+    let mut y_save_storage = [0.0f32; MAX_CELT_FRAME];
+    let _y_save = &mut y_save_storage[..resynth_alloc as usize];
+    let mut x_save2_storage = [0.0f32; MAX_CELT_FRAME];
+    let _x_save2 = &mut x_save2_storage[..resynth_alloc as usize];
+    let mut y_save2_storage = [0.0f32; MAX_CELT_FRAME];
+    let _y_save2 = &mut y_save2_storage[..resynth_alloc as usize];
+    let mut norm_save2_storage = [0.0f32; MAX_CELT_FRAME];
+    let _norm_save2 = &mut norm_save2_storage[..resynth_alloc as usize];
     let x_save: *mut celt_norm = _x_save.as_mut_ptr();
     let y_save: *mut celt_norm = _y_save.as_mut_ptr();
     let x_save2: *mut celt_norm = _x_save2.as_mut_ptr();
@@ -1659,8 +1695,10 @@ pub fn quant_all_bands(
         avoid_split_noise: (B > 1) as i32,
     };
 
-    let bytes_save_len: usize = core::cmp::max(1275usize, unsafe { (*ecp).storage as usize });
-    let mut bytes_save: Vec<u8> = vec![0u8; bytes_save_len];
+    /* `ALLOC(bytes_save, theta_rdo ? 1275 : ALLOC_NONE, unsigned char);` —
+       only used when `theta_rdo`, which implies `encode` and therefore
+       `ec.storage <= packet_size_cap == 1275`. */
+    let mut bytes_save = [0u8; 1275];
 
     lowband_offset = 0;
     let mut balance = balance_in;

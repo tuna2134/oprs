@@ -207,6 +207,26 @@ assert!(samples > 0);
 5. **負の長さを返す `repacketizer_out_range`** は、C では出力ポインタが負方向に進む未定義動作ですが、
    本実装はその値をそのまま返します（バイト予約の不変条件により到達不能）。
 
+## 性能
+
+`audiopus`（ネイティブ libopus）と `oprs` を**同一のアプリケーションコード**で両方にリンクして比べる
+A/B ベンチマークを `compat/bench` に用意しています（`cd compat/bench && cargo run --release --offline`）。
+エンコード/デコード（SILK・hybrid・CELT の3経路、複数レート/フレーム長、VBR/CBR、複雑度、FEC/PLC）と
+パケット解析・repacketizer・softclip を、同一入力・交互計測・中央値で比較し `oprs/audiopus` 比を
+降順に出力します。
+
+実測から分かっていること:
+
+- **`RUSTFLAGS="-C target-cpu=native"` が効きます。** ホストCPU向けにビルドすると LLVM が AVX2/FMA 等で
+  自動ベクトル化するため、エンコードが大きく速くなります（本リポジトリの環境で 48 kHz stereo 42倍→56倍、
+  48 kHz mono VOIP 57倍→93倍 リアルタイム）。浮動小数点は既定で再結合されないため**ビット一致は保たれます**
+  （`probe_celt_encoder`/`probe_celt`/`probe_vq`/`probe_kernels`/`probe_silkenc` で確認）。C 側はこの
+  フラグの影響を受けないので比較の公平性も保たれます。
+- **ヒープ確保の削減は速度に効きません。** CELT エンコーダの1フレームあたりの確保を 999 回（473 KB）から
+  384 回（363 KB）に減らしてもスループットは誤差範囲でした。差は確保ではなく計算そのものに由来します。
+- 参考値（48 kHz、complexity 10）: エンコード 37〜93倍、デコード 155〜4000倍 リアルタイム。
+  2.5 ms フレームの低遅延（CELT-only）がエンコードでは最も軽くなります。
+
 ## 自分で検証する
 
 `reference/` と `target/` は gitignore されているため、クローン直後は参照ビルドを作る必要があります

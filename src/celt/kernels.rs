@@ -77,6 +77,8 @@
 //! transliteration, not the original work.
 
 use crate::celt::arch::*;
+use crate::celt::celt::MAX_PVQ_N;
+use crate::celt::celt_lpc::CELT_LPC_ORDER;
 use crate::celt::mathops::celt_rcp;
 
 // ---------------------------------------------------------------------------
@@ -1225,7 +1227,8 @@ pub fn celt_fir(x: &[f32], num: &[f32], y: &mut [f32], n: i32, ord: i32) {
     debug_assert!(num.len() >= oo);
     debug_assert!(y.len() >= nn);
     debug_assert!(x.len() >= nn + oo, "celt_fir: x needs N + ord elements");
-    let mut rnum = vec![0.0f32; oo];
+    let mut rnum_storage = [0.0f32; CELT_LPC_ORDER as usize];
+    let rnum = &mut rnum_storage[..oo];
     for i in 0..oo {
         rnum[i] = num[oo - i - 1];
     }
@@ -1269,7 +1272,16 @@ pub fn celt_fir(x: &[f32], num: &[f32], y: &mut [f32], n: i32, ord: i32) {
 ///
 /// `x.len() >= len`, `y.len() >= len + 7`: the main loop loads 8 floats at
 /// `y+i+k` for `k = 0..8`, up to `y[len+6]`.
-fn xcorr_kernel_avx(x: &[f32], y: &[f32], sum: &mut [f32; 8], len: i32) {
+/// The body, factored out so that it can be inlined both into the
+/// AVX2+FMA build (where `f32::mul_add` becomes a single `vfmadd`
+/// instruction, as in the C) and into the portable fallback (where it stays a
+/// call to compiler-builtins' correctly-rounded `fmaf`).
+///
+/// `#[inline(always)]`: the caller decides the instruction set.  Inlining a
+/// feature-poorer callee into an AVX2+FMA caller is what lets
+/// `xcorr_kernel_avx_hw` below reach the FMA instruction at all.
+#[inline(always)]
+fn xcorr_kernel_avx_body(x: &[f32], y: &[f32], sum: &mut [f32; 8], len: i32) {
     debug_assert!(len > 0);
     debug_assert!(x.len() >= len as usize);
     debug_assert!(
@@ -1321,6 +1333,46 @@ fn xcorr_kernel_avx(x: &[f32], y: &[f32], sum: &mut [f32; 8], len: i32) {
     *sum = hadd8(b0, b1);
 }
 
+/// True when the host can execute the AVX2+FMA form of these kernels.
+///
+/// The reference configuration is compiled for the x86-64 baseline (`no -mfma`,
+/// no `.cargo/config` in the port), so without this dispatch `f32::mul_add`
+/// stays a call to compiler-builtins' `fmaf` — correct but ~5x the cost of the
+/// `vfmadd` the C emits.  `is_x86_feature_detected!` caches its answer.
+/// (Shared with `silk/float/x86/inner_product_FLP_avx2`, the other FMA user.)
+#[inline(always)]
+pub(crate) fn have_avx2_fma() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// [`xcorr_kernel_avx_body`] compiled for AVX2+FMA: every `f32::mul_add`
+/// becomes one `vfmadd` (single rounding, so the result is bit-identical to the
+/// correctly-rounded `fmaf` of the portable path).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn xcorr_kernel_avx_hw(x: &[f32], y: &[f32], sum: &mut [f32; 8], len: i32) {
+    xcorr_kernel_avx_body(x, y, sum, len)
+}
+
+/// `celt/x86/pitch_avx.c:39` `xcorr_kernel_avx` (static in the C), dispatched at
+/// run time exactly like the C's RTCD selection.
+fn xcorr_kernel_avx(x: &[f32], y: &[f32], sum: &mut [f32; 8], len: i32) {
+    #[cfg(target_arch = "x86_64")]
+    if have_avx2_fma() {
+        // SAFETY: guarded by `have_avx2_fma()`.
+        unsafe { xcorr_kernel_avx_hw(x, y, sum, len) };
+        return;
+    }
+    xcorr_kernel_avx_body(x, y, sum, len)
+}
+
 /// `celt/x86/pitch_avx.c:86` `celt_pitch_xcorr_avx2` (the `PITCH_XCORR_IMPL[4]`
 /// entry).  Writes `max_pitch` outputs, `xcorr[i] = Σ x[m]·y[i+m]`:
 /// 8 lags at a time with [`xcorr_kernel_avx`], the remaining `max_pitch mod 8`
@@ -1330,6 +1382,33 @@ fn xcorr_kernel_avx(x: &[f32], y: &[f32], sum: &mut [f32; 8], len: i32) {
 /// `y.len() >= max_pitch + len - 1` (the AVX2 blocks read up to
 /// `y[max_pitch-8+14]`, the SSE tail up to `y[max_pitch-1+len-1]`).
 pub fn celt_pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: i32, max_pitch: i32) {
+    #[cfg(target_arch = "x86_64")]
+    if have_avx2_fma() {
+        // SAFETY: guarded by `have_avx2_fma()`.
+        unsafe {
+            celt_pitch_xcorr_hw(x, y, xcorr, len, max_pitch);
+        }
+        return;
+    }
+    celt_pitch_xcorr_avx2_body(x, y, xcorr, len, max_pitch)
+}
+
+/// [`celt_pitch_xcorr_avx2_body`] compiled for AVX2+FMA, so that the 8-lag
+/// [`xcorr_kernel_avx_body`] inlined into it uses real `vfmadd`/256-bit
+/// registers (the C's `-mavx2 -mfma` translation unit).
+///
+/// Bit-exactness: AVX2/FMA change neither the rounding (FMA keeps its single
+/// rounding) nor the operation order of the transliterated C.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn celt_pitch_xcorr_hw(x: &[f32], y: &[f32], xcorr: &mut [f32], len: i32, max_pitch: i32) {
+    celt_pitch_xcorr_avx2_body(x, y, xcorr, len, max_pitch)
+}
+
+/// The body of the AVX2 `celt_pitch_xcorr`, shared by the hardware-FMA path and
+/// the portable fallback.
+#[inline(always)]
+fn celt_pitch_xcorr_avx2_body(x: &[f32], y: &[f32], xcorr: &mut [f32], len: i32, max_pitch: i32) {
     debug_assert!(max_pitch > 0);
     debug_assert!(len > 0);
     debug_assert!(x.len() >= len as usize);
@@ -1339,7 +1418,7 @@ pub fn celt_pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: i32, max_p
     while i < max_pitch - 7 {
         let ii = i as usize;
         let mut sum = [0.0f32; 8];
-        xcorr_kernel_avx(x, &y[ii..], &mut sum, len);
+        xcorr_kernel_avx_body(x, &y[ii..], &mut sum, len);
         for k in 0..8 {
             xcorr[ii + k] = sum[k];
         }
@@ -1407,11 +1486,36 @@ pub fn op_pvq_search_sse2(x: &[f32], iy: &mut [i32], k: i32, n: i32, _arch: i32)
     let nn = n as usize;
     debug_assert!(x.len() >= nn);
     debug_assert!(iy.len() >= nn + 3);
-    // ALLOC(X, N+3); OPUS_COPY(X, _X, N); X[N]=X[N+1]=X[N+2]=0
-    let mut xx = vec![0.0f32; nn + 3];
+    // `VARDECL(celt_norm, y/X/signy); ALLOC(..., N+3, ...)` (`celt/x86/
+    // vq_sse2.c`) — a real PVQ band is capped at `MAX_PVQ_N` by the mode
+    // creator, so the codec path uses stack storage of the C size.  The
+    // `kernels` probe calls this directly with `N` up to 2000, which no mode
+    // can reach; only those cases fall back to the heap.
+    let mut xx_heap: Vec<f32> = Vec::new();
+    let mut y_heap: Vec<f32> = Vec::new();
+    let mut signy_heap: Vec<f32> = Vec::new();
+    let mut xx_storage = [0.0f32; MAX_PVQ_N + 3];
+    let mut y_storage = [0.0f32; MAX_PVQ_N + 3];
+    let mut signy_storage = [0.0f32; MAX_PVQ_N + 3];
+    let mut xx: &mut [f32] = if nn + 3 <= MAX_PVQ_N + 3 {
+        &mut xx_storage[..nn + 3]
+    } else {
+        xx_heap.resize(nn + 3, 0.0);
+        xx_heap.as_mut_slice()
+    };
     xx[..nn].copy_from_slice(&x[..nn]);
-    let mut y = vec![0.0f32; nn + 3];
-    let mut signy = vec![0.0f32; nn + 3];
+    let mut y: &mut [f32] = if nn + 3 <= MAX_PVQ_N + 3 {
+        &mut y_storage[..nn + 3]
+    } else {
+        y_heap.resize(nn + 3, 0.0);
+        y_heap.as_mut_slice()
+    };
+    let mut signy: &mut [f32] = if nn + 3 <= MAX_PVQ_N + 3 {
+        &mut signy_storage[..nn + 3]
+    } else {
+        signy_heap.resize(nn + 3, 0.0);
+        signy_heap.as_mut_slice()
+    };
 
     // Get rid of the sign
     let mut sums = [0.0f32; 4];
@@ -1609,8 +1713,25 @@ pub fn op_pvq_search_c(x: &mut [f32], iy: &mut [i32], k: i32, n: i32) -> f32 {
     let nn = n as usize;
     debug_assert!(x.len() >= nn);
     debug_assert!(iy.len() >= nn);
-    let mut y = vec![0.0f32; nn];
-    let mut signx = vec![0i32; nn];
+    // `VARDECL(celt_norm, y); VARDECL(int, signx); ALLOC(..., N, ...)`
+    // (`celt/vq.c`) — stack storage for the codec's `N <= MAX_PVQ_N` bands,
+    // with a heap fallback for the `kernels` probe's unreachable sizes.
+    let mut y_heap: Vec<f32> = Vec::new();
+    let mut signx_heap: Vec<i32> = Vec::new();
+    let mut y_storage = [0.0f32; MAX_PVQ_N];
+    let mut signx_storage = [0i32; MAX_PVQ_N];
+    let y: &mut [f32] = if nn <= MAX_PVQ_N {
+        &mut y_storage[..nn]
+    } else {
+        y_heap.resize(nn, 0.0);
+        y_heap.as_mut_slice()
+    };
+    let signx: &mut [i32] = if nn <= MAX_PVQ_N {
+        &mut signx_storage[..nn]
+    } else {
+        signx_heap.resize(nn, 0);
+        signx_heap.as_mut_slice()
+    };
 
     // Get rid of the sign
     let mut sum = 0.0f32;

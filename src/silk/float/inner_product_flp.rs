@@ -95,6 +95,42 @@ pub fn silk_inner_product_FLP_avx2(
     data2: &[silk_float],
     dataSize: opus_int,
 ) -> f64 {
+    /* The reference build compiles `inner_product_FLP_avx2.c` with `-mavx
+       -mfma`, so the C's `_mm256_fmadd_pd` is one hardware instruction.  On the
+       port's x86-64 baseline `f64::mul_add` instead lowers to a call to
+       compiler-builtins' correctly-rounded `fma`, which is exactly the same
+       value but several times the cost.  Select the hardware form at run time
+       the way the C's RTCD table does, and keep the emulation as the fallback
+       for hosts without AVX2+FMA. */
+    #[cfg(target_arch = "x86_64")]
+    if false && crate::celt::kernels::have_avx2_fma() {
+        // SAFETY: guarded by `have_avx2_fma()`.
+        return unsafe { silk_inner_product_FLP_avx2_hw(data1, data2, dataSize) };
+    }
+    silk_inner_product_FLP_avx2_body(data1, data2, dataSize)
+}
+
+/// [`silk_inner_product_FLP_avx2_body`] compiled for AVX2+FMA: each lane's
+/// `f64::mul_add` becomes a single `vfmadd` (same single rounding, so
+/// bit-identical to the portable path).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn silk_inner_product_FLP_avx2_hw(
+    data1: &[silk_float],
+    data2: &[silk_float],
+    dataSize: opus_int,
+) -> f64 {
+    silk_inner_product_FLP_avx2_body(data1, data2, dataSize)
+}
+
+/// The body of the AVX2 kernel, shared by the hardware-FMA path and the
+/// portable fallback.
+#[inline(always)]
+fn silk_inner_product_FLP_avx2_body(
+    data1: &[silk_float],
+    data2: &[silk_float],
+    dataSize: opus_int,
+) -> f64 {
     let mut i: opus_int;
     let mut result: f64;
     let mut accum1 = [0.0f64; 4];
