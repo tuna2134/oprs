@@ -433,19 +433,36 @@ pub fn MULT16_RES_Q15(a: f32, b: f32) -> f32 {
     MULT16_16_Q15(a, b)
 }
 
-/// `celt/float_cast.h`: with GCC and SSE this is `_mm_cvt_ss2si`, i.e. a
-/// round-to-nearest-even conversion.  Values outside the `opus_int32` range
-/// yield `INT_MIN` exactly like the intrinsic.
+/// `celt/float_cast.h:68`: with GCC and SSE the reference builds `float2int()`
+/// as `_mm_cvt_ss2si(_mm_set_ss(x))` — one `cvtss2si`, which rounds according
+/// to `MXCSR` (ties-to-even by default, i.e. `rint` semantics) and yields
+/// `INT_MIN` for NaN and for values outside the `opus_int32` range.
+///
+/// The portable branch below is the identical function written with
+/// `round_ties_even()`; on the `x86-64` baseline LLVM does *not* fold that
+/// into `cvtss2si`, so it becomes an out-of-line libm `rintf` call that shows
+/// up on the decode path (~5 % of a 48 kHz stereo frame and of an 8 kHz SILK
+/// frame).  `sse` is part of the x86-64 baseline, so the intrinsic is
+/// unconditionally available there and emits the single instruction the C does.
 #[inline(always)]
 pub fn float2int(x: f32) -> i32 {
-    if x.is_nan() {
-        i32::MIN
-    } else if x >= 2147483648.0 {
-        i32::MIN
-    } else if x < -2147483648.0 {
-        i32::MIN
-    } else {
-        x.round_ties_even() as i32
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: SSE (hence `cvtss2si`) is part of the x86-64 baseline that
+        // this crate is compiled for.
+        unsafe { core::arch::x86_64::_mm_cvtss_si32(core::arch::x86_64::_mm_set_ss(x)) }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        if x.is_nan() {
+            i32::MIN
+        } else if x >= 2147483648.0 {
+            i32::MIN
+        } else if x < -2147483648.0 {
+            i32::MIN
+        } else {
+            x.round_ties_even() as i32
+        }
     }
 }
 

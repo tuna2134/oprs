@@ -1,3 +1,10 @@
 /target
 /reference
 /compat
+
+# profiling / scratch artefacts (agents' temporary work, see docs/progress.md)
+/prof-scratch/
+/asm_scratch.txt
+/examples/scratch_dec_loop.rs
+/examples/prof_repkt.rs
+/repacketizer.rs.bak

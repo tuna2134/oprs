@@ -484,3 +484,243 @@ Four follow-ups requested by the user after the decode investigation, with the a
 4. **`Repacketizer::new()` cost** (owner: optimisation agent).  A/B: 251 ns vs libopus 47 ns (ratio 5.3) for `new()`+drop, paid every `repacketizer` iteration; `probe_repacketizer` must stay IDENTICAL and a measured breakdown is an acceptable answer.  **State: not started.**
 
 Cumulative performance position before these four items (all verified): CELT `mul_add`→libm `fmaf` fix recovered the `-C target-cpu=native` CELT/hybrid gain in the default build (A/B overall geomean 2.381 frozen → **2.064**; `enc_i16` median 2.753 → **1.967**); allocation batches cut encode 999 → **98** and decode 327 → **37** allocs/frame; decode on the 48k stereo row improved 208.9 → **~238x RT** (+14 %).
+
+## Residual-performance goal (goal-505bb50a): state
+
+Third optimisation goal, opened after the harness v2 (457 rows: real decode / FEC / PLC separated) gave the current worst rows at src `6b069266` — they are all **encode** rows plus repacketizer:
+`enc_f32 8k/mono/20ms/lowdelay` 2.617 · `enc_i16 8k/mono/20ms/lowdelay` 2.513 · `enc_* 8k/mono/10ms/lowdelay` 2.450 · `enc_i16 12k/mono/{20,40,60}ms/audio` 2.387–2.405 · `repacketizer` 2.997/2.887 · `repkt_new` 3.951. No decode row is in the worst-10 any more (real-decode medians: `dec_i16` 1.303, `dec_f32` 1.229; oprs is *faster* on 16 kHz hybrid 0.43–0.56 and 48 kHz mono SILK 0.83).
+
+**DONE — `Repacketizer` container redesign (owner: optimisation agent).** `[Vec<u8>; 48]`×2 → first `[Option<Box<[u8]>>; 48]`×2 (241 → 151.6 ns, 1888 B), then the sparse container form. Final measurement, run by the orchestrator from the agent's scratch profiler (`examples/prof_repkt.rs`, min of 7, release):
+```
+size_of::<OpusRepacketizer>() = 400 B      (was 2656 B → 1888 B; libopus layout is 1120 B)
+Repacketizer::new() + drop              25.8 ns/op   (was 241 ns; libopus measures 47 ns)
+OpusRepacketizer::default() + drop       7.7 ns/op
+new() + cat3 + out_range + drop        521.7 ns/op   (wrapper overhead ≈44 ns)
+```
+Verified by the orchestrator on this change: `probe_repacketizer` IDENTICAL (748 lines), all 25 probes bit-exact, `ACCEPTANCE: BIT-EXACT`, 315 tests. Still to do for this item: re-run `compat/bench` to record the `repacketizer`/`repkt_new` rows (expected below 1.0 now).
+
+**PENDING (assigned, not started at hand-off).**
+* Encode residuals (owner: optimisation agent `e6839d36`): the 8 kHz `/lowdelay` rows are `MODE_CELT_ONLY` and the `12k/.../audio` rows share the CELT-only timing signature, so this is CELT-side, not SILK NSQ. Suggested order: check `nm target/release/liboprs.rlib | grep fmaf` for a libm call on *this* path (the CELT `xcorr` FMA fix may not be reached because the 8 kHz CELT-only prefilter does not run), then `clt_mdct_forward/backward`, then `clt_compute_allocation`/`quant_all_bands`/`alg_quant`, then use `objdump` to find scalar where C has SSE.
+* Decode gaps (owner: new agent `44430378`): 48 kHz fullband stereo CELT 1.25, 8 kHz narrowband 1.30, 8 kHz 2ch 2.5 ms 1.4–1.5. Attribution phase (gdb sampling + a scratch decode loop, since `perf` is unavailable). Known: allocations are not the cause (327 → 17/frame gave ~+5 %); `celt_inner_prod`/`dual_inner_prod` are already packed SSE; `comb_filter_const` is scalar but ~2 % of decode; `celt_decode_with_ec_dred` is 82–86 % of decode time. Baseline `bench_min` decoders: 48k stereo 236.6x, 48k mono voip 487.9x, 48k LD 166.8x, 16k mono 1996.9x, 8k mono 3812x.
+
+**Housekeeping before the next commit**: the agents' scratch files are untracked and should be removed or ignored — `examples/prof_repkt.rs`, `examples/scratch_dec_loop.rs`, `prof-scratch/`, `repacketizer.rs.bak` (earlier scratch of this kind was deleted by its owner at the end of each task).
+
+Also committed in `8d53a14` (by the user): the README performance section was rewritten by the orchestrator to match the measurements — decode paths must be measured separately (with `fec=true` both libraries conceal instead of decoding), the A/B per-workload medians, the corrected `-C target-cpu=native` claim (**now ~3–5 % on encode and nothing on decode**, because the tree carries explicit runtime-dispatched SIMD), and the allocation numbers (encode 999 → 14, decode 327 → 17 per frame).
+
+### goal-505bb50a — final numbers for the two closed items
+
+**Repacketizer (DONE).** `frames`/`paddings` are now `Vec<Option<Box<[u8]>>>` grown lazily (`grow_frames`/`grow_paddings` at the single `cat` write cluster, sized `base + max(parsed.count, curr_nb_frames)` so the `cnf` loop and the `while i < nb_frames` loops in `opus_packet_unpad`/`opus_multistream_packet_unpad` stay in range; reads via `.get(i).and_then(|o| o.as_deref()).unwrap_or(&[])` at the four sites).  Struct 2656 → 1888 → **400 B**.  `new()`+drop 241 → 151.6 → **42.7 ns** (min of 7; the orchestrator's run of the same scratch loop measured 25.8 ns — the two agree that construction is now *faster than libopus' 47 ns*).  Harness `BENCH_FILTER=repacketizer` (`compat/out/bench_repkt_after.txt`): `repkt_new` **0.726** (oprs 41 ns vs audiopus 56 ns), `repacketizer` rows **2.997 → 2.399** and **2.887 → 2.421**.  Probes `repacketizer` 748 / `multistream` 1754 / `opus_encoder` 2856 / `opus_decoder` 29149 IDENTICAL; 25 probes + oracle + 315 tests green.  **Remaining 2.4–2.5x** on that row is `cat`'s per-frame `to_vec().into_boxed_slice()`; going below needs the C's borrowed-pointer contract or one shared backing buffer (not attempted).
+
+**8 kHz `/lowdelay` + 12 kHz `/audio` encode residuals (localised, NOT fixed).**  Codegen is ruled out by measurement: forcing `+avx2,+fma` crate-wide buys ≤5 % (8k/20ms −2.8 %, 8k/10ms −9.4 %, 12k/20ms −5.0 %, 12k/60ms −3.5 %) and `-C target-cpu=native` is no better — all inside the ±10 % noise of this shared box.  A control sweep at the same internal CELT `N = 960` shows 8k **147 µs** < 16k **181 µs** < 48k **195 µs**: there is **no 8 kHz pathology**, and the excess over libopus grows with the number of *real input samples* (8k: aud 51 571 vs opr 134 946 ns → 83 µs excess).  The suspect is therefore the **per-input-sample opus-layer work**, not the rate-independent CELT kernels: the `upsample = 6` slow `celt_preemphasis` branch plus its 960-sample zero-fill, the analysis FFT, and the delay-`pcm_buf` copies.  No stage-level breakdown was obtained (instrumentation scripting failed twice); the anchors for whoever picks it up: timers at `celt_encode_with_ec` entry, before `/* Find pitch period and gain */`, after the prefilter block, before the `freq`/`bandE` declarations, before `/* Residual quantisation */`, and before `let error_code = ec.get_error()`, accumulating into a `pub static [AtomicU64; 5]` every 2000 calls.
+
+State at hand-off: gates green (25 probes, oracle BIT-EXACT, 315 tests), `alloc_count` 14.01 encode / 17 decode per frame at 48 k stereo, `bench_min` 48k/stereo/audio 43.9x enc / 198.1x dec, 48k/mono/voip 89.4 / 466.8, 8k/mono/voip 169.8 / 3433.  **The only uncommitted `src` delta is `src/opus/repacketizer.rs`.**  Untracked leftovers to remove before the next commit: `examples/scratch_dec_loop.rs`, `prof-scratch/` (the decode agent still owns these), and any remaining scratch from this batch.
+
+### goal-505bb50a — decode attribution (item B, "identify" half DONE)
+
+Measured by the decode agent on the real `bench` corpus with temporary `Instant`/stage instrumentation (oprs side only so far; a C-side SIGPROF/`ITIMER_PROF` RIP-sampling profiler in a throwaway crate linking audiopus was being built to get the symbol-by-symbol comparison):
+
+**48 kHz fullband stereo** (`dec_i16 48k/2ch/20ms/audio`, A/B ratio 1.25):
+```
+celt_decode_with_ec_dred 100 %
+  quant_all_bands      66.6 %   <- largest
+    alg_unquant        37.6 %   <- single largest (PVQ decode)
+    quant_band/partition 29 %
+  celt_synthesis       21.3 %   (clt_mdct_backward 17.7 %)
+  deemphasis            4.6 %
+  clt_compute_allocation 2.2 %
+  comb_filter          ~0 %     (postfilter gains are 0 on real packets — unlike synthetic transients)
+```
+**8 kHz narrowband** (`dec_i16 8k/mono/20ms/voip`, A/B ratio 1.30):
+```
+silk_Decode  83 % of the frame
+  silk_decode_pulses  40.9 %
+  silk_decode_core    35.3 %
+  decode_parameters    9.9 %
+  decode_indices       4.4 %
+  (the CELT wrapper is irrelevant at 8 kHz)
+```
+
+So the two decode gaps have **different** targets: 48 kHz is `alg_unquant` (PVQ) + `clt_mdct_backward`, 8 kHz is the SILK decoder body (`silk_decode_pulses` + `silk_decode_core` = 76 %).  Note the earlier assumption that `comb_filter`/`comb_filter_const` mattered was based on synthetic transients; on real packets it is ~0 % and should be deprioritised.  No fix was landed at hand-off.  Scratch to remove when the agent finishes: `prof-scratch/`, `examples/scratch_dec_loop.rs`, `asm_scratch.txt`.
+
+#### Symbol-level confirmation (RIP sampling, 48 kHz stereo decode)
+
+The decode agent's SIGPROF/`ITIMER_PROF` sampler (throwaway crate in `prof-scratch/sampler/`, links `oprs`) produced 2,985 RIP samples (`rips_oprs_48s.txt` + `base_oprs_48s.txt`).  Symbolised with `addr2line -f -C -e prof-scratch/sampler/target/release/sampler <rip-base>`:
+
+```
+4.9 %  oprs::celt::vq::exp_rotation                                  (5 addresses — largest cluster; inside alg_unquant)
+2.7 %  oprs::celt::cwrs::decode_pulses
+2.6 %  oprs::celt::celt_decoder::deemphasis
+1.8 %  <oprs::opus::decoder::OpusDecoder>::decode
+0.8 %  compiler_builtins::math::libm_math::arch::x86::detect::load_x86_features
+```
+
+This confirms the stage attribution (`alg_unquant` 37.6 %, `clt_mdct_backward` 17.7 %) and adds a **Rust-only, arithmetic-free lead**: CPU-feature detection is being executed **repeatedly inside the decode hot path** (the C caches `opus_select_arch()`), i.e. 0.8 % of samples in `load_x86_features`.  Fix to try first: cache the `is_x86_feature_detected!` result per kernel group (`OnceLock`/`AtomicU8`) or hoist it out of the per-band loop wherever the decode dispatch sits — also check for a `mul_add`→`fmaf`-driven call into compiler-builtins per sample.  Priority order for the 48 kHz path after that: `vq::exp_rotation` (≈5 %, part of `alg_unquant`), then `clt_mdct_backward`.  The 8 kHz narrowband path is a different target (SILK decoder: `silk_decode_pulses` 40.9 % + `silk_decode_core` 35.3 %).
+
+#### C-side sampling and the C-vs-oprs asymmetry (48 kHz stereo decode)
+
+The same agent built a **C-side** sampler with the symbol-bearing static libopus from `reference/` (`prof-scratch/sampler-c/target/release/sampler-c`, RIP samples `rips_cstatic_48s_{1s,4s}.txt` + `maps_cstatic_48s_1s.txt`).  Both sides symbolised (C 2,978 samples; oprs 2,985):
+
+```
+C (libopus)                              oprs
+5.7 %  quant_all_bands                   4.9 %  celt::vq::exp_rotation      <-- oprs' single hottest
+2.1 %  op_pvq_search_sse2                2.7 %  celt::cwrs::decode_pulses
+3.3 %  silk_decode_core                  2.6 %  celt::celt_decoder::deemphasis
+0.9 %  compute_theta                     1.8 %  <opus::decoder::OpusDecoder>::decode
+—      exp_rotation (outside C top-10)   0.8 %  compiler_builtins::…::load_x86_features
+```
+
+**CORRECTED**: the first version of this comparison used an under-sampled C run (2,978 samples, 1 s) and wrongly concluded that `exp_rotation` was an asymmetry.  With the larger set (`rips_cstatic_48s.txt`, **3,970 samples**) the C ranking is:
+
+```
+C (libopus), 3970 samples                 oprs, 2985 samples
+5.4 %  exp_rotation1   (6 addresses)      4.9 %  celt::vq::exp_rotation      -> NO asymmetry (same work, ~5 % both)
+3.0 %  deemphasis                         2.6 %  celt::celt_decoder::deemphasis
+1.3 %  decode_pulses                      2.7 %  celt::cwrs::decode_pulses  -> oprs ~2x, the clearest difference
+1.2 %  quant_partition                    (not in oprs top)
+~2.0 % ec_dec_uint + ec_decode            (not in oprs top)
+—      op_pvq_search_sse2 (absent in this run; 2.1 % in the 1 s run -> unstable between runs)
+```
+
+So the remaining candidates are `src/celt/cwrs.rs` `decode_pulses` (2x the C share; check for a scalar inner loop where C is packed) and confirming whether `ec_dec_uint`/`ec_decode`/`quant_partition` are genuinely cheaper in oprs or just inlined/renamed in the profile.  `op_pvq_search` should only be prioritised on evidence from a **decode-only** oprs profile (the agent built `packets_48s.bin` for that).  Lesson: never draw a C-side ranking from the smallest sample set.
+
+Also noted: `load_x86_features` (0.8 % on the oprs side) is **not** from our dispatch (only two `is_x86_feature_detected` sites exist crate-wide, both cached) and **not** from a decode-path `mul_add` (the only `mul_add` uses are `src/celt/kernels.rs`'s encoder `xcorr_kernel_avx` and `src/silk/float/inner_product_flp.rs`'s encoder analysis) — so that sample most likely comes from encoder work inside the sampler harness or from compiler-builtins machinery reached another way.  It must be re-measured with decode-only sampling before any fix is attempted.
+
+#### CORRECTION #2 — the C-side symbolisation was off by 0x1000 (all earlier C rankings are INVALID)
+
+The decode agent found that `prof-scratch/symbolize.py` computed `vaddr = rip - seg_start + file_offset`, but the C sampler's text segment has `p_offset=0x444c40` while `p_vaddr=0x445c40`, so the correct base is the object's file-offset-0 mapping start; the script's base was **0x1000 too high** and **every C sample was attributed to the preceding function** (that is why "encoder" symbols such as `alg_quant`, `silk_decode_core`, `opus_decoder_ctl` appeared in a CELT-only 48 kHz decode).  The oprs side was accidentally correct (its exe text mapping has `file_offset == p_vaddr`).  **Everything derived from the C ranking in the section above — including the "asymmetries" I raised and the "`exp_rotation`/`decode_pulses` are at parity" retractions, and the "no 8 kHz pathology / corpus has silk_decode_core" observations — was read off shifted symbols and must not be trusted.**
+
+Corrected C profiles (fresh decode-only runs, ~9,930 samples each, 10 s):
+
+```
+C 48k/2ch/20ms/audio (74.13 us/frame)          oprs 48k (92.03 us/frame = 1.24x)
+15.62 % opus_fft_impl                           11.93 % decode_pulses
+13.61 % decode_pulses                            9.88 % opus_fft_impl
+10.66 % exp_rotation1                            9.61 % exp_rotation1
+ 7.96 % quant_partition                          8.19 % compute_theta      <-- oprs 1.8x
+ 6.16 % clt_mdct_backward_c                      6.96 % OpusDecoder::decode
+ 4.99 % deemphasis                               6.60 % clt_mdct_backward_c
+ 4.55 % compute_theta                            6.28 % quant_partition
+ 3.34 % opus_limit2_checkwithin1_c               5.04 % rintf              <-- libm float->int16, oprs 1.8x vs celt_float2int16_c 2.78 %
+ 3.06 % ec_dec_uint                              4.30 % deemphasis
+ 2.78 % celt_float2int16_c                       3.58 % ec_dec_uint
+ 2.58 % alg_unquant                              2.81 % alg_unquant
+ 0.69 % celt_inner_prod_sse                      1.79 % celt_inner_prod     <-- oprs 2.6x
+C 8k/mono/20ms/voip (7.13 us/frame)              oprs 8k (9.02 us/frame = 1.27x)
+29.03 % silk_decode_core                        30.05 % silk_decode_core
+23.27 % ec_dec_icdf                             19.28 % ec_dec_icdf
+11.07 % ec_dec_normalize                        12.11 % silk_decode_signs   <-- oprs 1.4x (C 8.56 %)
+ 8.56 % silk_decode_signs                        5.06 % rintf
+ 5.28 % silk_LPC_inverse_pred_gain_c            4.91 % silk_shell_decoder   <-- oprs 1.3x (C 3.79 %)
+ 3.79 % silk_shell_decoder                      4.70 % silk_LPC_inverse_pred_gain_c
+ 1.11 % silk_decode_pulses
+```
+
+Four **concrete single-function deficits** (not SIMD-vs-scalar, but codegen/implementation) — the current work list:
+1. `compute_theta` **8.19 % vs 4.55 % (1.8x)** — biggest 48 kHz deficit;
+2. float→int16 conversion: **`rintf` 5.04 %** (and 5.06 % at 8 kHz) vs `celt_float2int16_c` 2.78 % — a **libm call per sample** where the C uses a rounding instruction (same family as the earlier `fmaf` bug);
+3. `celt_inner_prod` **1.79 % vs `celt_inner_prod_sse` 0.69 % (2.6x)**;
+4. 8 kHz: `silk_decode_signs` 12.11 % vs 8.56 % (1.4x) and `silk_shell_decoder` 4.91 % vs 3.79 % (1.3x).
+
+The agent's decode-only oprs sampler (`.scratch/decprof`, decoding the same C-encoded `packets_*.bin` with all init before the timer) reproduces the harness gaps (92.03 vs 74.13 µs and 9.02 vs 7.13 µs), so these profiles are trustworthy.  It is taking items 1–3 first and will cross-check with `BENCH_FILTER=dec_i16` on `compat/bench` (self-normalising, far less noisy than `bench_min`, which produced a 325x outlier on a 491x row).
+
+#### WIN: the `rintf` libm-call fix — decode +6…+20 %, bit-exact
+
+`src/celt/arch.rs:448` had `x.round_ties_even() as i32` for the float→int16 conversion.  On a baseline x86-64 target that does not inline: `nm -u target/release/liboprs.rlib | grep -c rintf` was **6** (libm calls, same family as the earlier `fmaf` bug).  It was replaced with an SSE4.1 `#[target_feature]` path performing the same ties-to-even rounding, keeping the old code as the fallback.  After the change:
+
+```
+nm -u target/release/liboprs.rlib | grep -c rintf : 6 -> 0
+gates: all 25 probes bit-exact | ACCEPTANCE: BIT-EXACT (decoded PCM compared) | 315 passed
+bench_min decode:  48k/stereo/audio 236.6 -> 251.2x   (+6.2 %)
+                   48k/mono/voip    487.9 -> 544.3x   (+11.6 %)
+                   16k/mono/voip   1996.9 -> 2391.3x  (+19.7 %)
+                   8k/mono/voip    3812.0 -> 4507.6x  (+18.2 %)
+```
+
+The C side was disassembled to confirm its `celt_float2int16_c` really is `cvtss2si`, i.e. the change is bit-exact by construction.  (Caveat: `bench_min` noise is ±5–10 %; `BENCH_FILTER=dec_i16` on `compat/bench` is the low-noise arbiter and the other agent is re-measuring with it.)
+
+#### Symbol-level *differential* profile (reference static libopus vs oprs, same packets)
+
+This is the trustworthy form of the comparison: both sides SIGPROF-sampled on the same C-encoded corpus, reported as **absolute ns/frame deltas** (not cross-build symbol shares), with each object's base derived from its offset-0 mapping and cross-checked with `gdb info symbol`.  48k/2ch/20ms/audio: oprs 88.0 µs vs C 73.6 µs (gap 14.4 µs).
+
+```
+symbol                     oprs    C     delta
+<OpusDecoder>::decode      5512     0    +5497   (i16 output loop + softclip glue)
+compute_theta              7568  3006    +4562   <-- largest single kernel delta (2.5x)
+rintf                      4041     0    +4041   <-- REMOVED by the arch.rs fix above
+pcm_soft_clip              2109  4132    -2023   (oprs faster)
+clt_mdct_backward_c        6203  4739    +1465
+celt_inner_prod            1489   563     +926   (*C celt_inner_prod_sse)
+exp_rotation1              9376  8086    +1290
+decode_pulses             10883  9863    +1020
+ec_dec_uint                2907  2384     +523
+unquant_coarse_energy      1081   548     +533
+deemphasis                 4041  3732     +309
+alg_unquant                2091  2029      +63   (equal -> NOT the gap)
+opus_fft_impl              8437 11077    -2640   (oprs faster)
+```
+
+Remaining decode work list, in priority order: (1) `compute_theta` (2.5x, the biggest kernel delta); (2) `clt_mdct_backward_c`; (3) `celt_inner_prod` vs the C's SSE body; (4) `exp_rotation1` / `decode_pulses`; then the `<OpusDecoder>::decode` i16-output-loop + softclip glue, which is per-sample opus-layer work (same family as the encode residual, where the `rintf` fix should also help since `opus_encode_float` converts float input to int16).  Ownership: the decode/`arch.rs` work is one agent's; the C-side sampler's owner is now verification-only, to avoid collisions.
+
+#### FINAL STATE of the residual-performance goal (goal-505bb50a)
+
+**Two wins landed and verified; the tree's only source deltas are those two.**
+
+1. **`Repacketizer` container redesign** — `frames`/`paddings` became lazily-grown `Vec<Option<Box<[u8]>>>`; struct 2656 → 1888 → **400 B**.  Micro: `new()`+drop 241 → 151.6 → **42.7 ns** (orchestrator's run of the same loop: 25.8 ns; both agree construction is now *faster than libopus' 47 ns*).  Harness: `repkt_new` **0.726** (oprs 41 ns vs audiopus 56 ns), `repacketizer` rows **2.997 → 2.399** and **2.887 → 2.421**.  Remaining 2.4–2.5x on that row is `cat`'s per-frame `to_vec().into_boxed_slice()`; going lower needs the C's borrowed-pointer contract (not attempted).
+
+2. **`FLOAT2INT16` libm call** (`src/celt/arch.rs`) — `x.round_ties_even() as i32` did **not** fold into `cvtss2si` on the x86-64 baseline; it emitted an out-of-line libm `rintf` (6 refs in `liboprs.rlib`).  **Proven with gdb**, not inference: `break rintf; run` → `#0 rintf ()`, `#1 <oprs::opus::decoder::OpusDecoder>::decode ()`.  The C (`celt/float_cast.h:68`) does `_mm_cvt_ss2si(_mm_set_ss(x))` under `__GNUC__ && __SSE__`.  Replaced with `_mm_cvtss_si32(_mm_set_ss(x))` under `#[cfg(target_arch = "x86_64")]`, keeping `round_ties_even()` as the non-x86_64 fallback.  Bit-exact by construction (same MXCSR ties-to-even; the intrinsic's integer-indefinite result equals the old NaN/range guards — checked 2^31, −2^31, ±1e30, NaN).  `rintf` refs **6 → 0**.
+   Measurements: low-noise steady-state SIGPROF, identical method both sides — **48k/2ch/20ms/audio 92.03 → 83.75 µs/frame (−9.0 %), gap 1.241x → 1.130x**; **8k/mono/20ms/voip 9.02 → 8.35 µs (−7.4 %), gap 1.265x → 1.171x**.  `bench_min` decode medians (5 runs): 48k/st +8.0 %, 48k/mono +1.6 %, 48k/ld +6.5 %, 16k/mono **+13.4 %**, 8k/mono **+18.8 %**.  Independent `BENCH_FILTER=dec_i16` A/B: geomean **1.303 → 1.252**, worst row `8k/mono/20ms/voip` **1.303 → 1.155 (−13.7 %)**.
+
+**Measured negatives — do not re-investigate without new evidence:**
+* `vq::exp_rotation`: the C's `celt_cos_norm(x)` is `((float)cos((.5f*PI)*(x)))` with `PI` an **untyped double literal**, so the C pays the *same two libm `cos()` calls*; corrected profiles are `exp_rotation1` 10.66 % (C) vs 10.97 % (oprs) — parity.
+* `clt_mdct_backward_c`: already packed in our build (28 `mulps`/27 `addps`/67 `shufps`); C 4.57 µs vs ours 5.89 (1.29x codegen) — and we are **faster** in the FFT (`opus_fft_impl` 9.15 vs 11.58 µs).
+* **8 kHz SILK has no C SIMD to transcribe**: all seven `silk/x86/x86_silk_map.c` dispatch tables (VAD_GetSA_Q8, NSQ, NSQ_del_dec, VQ_WMat_EC, burg_modified, inner_prod16, inner_product_FLP) are **encoder-only**; there is no target for `silk_decode_pulses`/`decode_core`/`NLSF_decode`/`decode_indices`.
+* CELT decoder RTCD helpers are only `celt_inner_prod`, `dual_inner_prod`, `comb_filter_const`; the last is unreachable on real packets (zero postfilter gain → `comb_filter` returns after `OPUS_MOVE`).
+* `compute_theta`: both symbols contain **exactly 12 `div` instructions**, so the comparison is like-for-like; our body is 5727 B vs the C's 3606 B and carries Rust-only cold-path bloat (4× `_Unwind_Resume@plt`, inlined `get_or_init_slow`, bounds/`RefCell` panic paths).  A genuine per-call codegen delta, but rewriting a bit-exactness-critical entropy function is out of proportion.
+* `load_x86_features` (my earlier lead) was a red herring: `fma`/`fmaf` have **zero** references in the decode binary (dead code), `opus_select_arch()` is the constant 4, and there is no decode-path `mul_add`.  Its *class* was right — the real one was the libm `rintf`.
+* Rejected by measurement: `lto="fat"` + `codegen-units=1` (48k/st 223.5 vs 235.8, 8k 3302 vs 3692 — worse); `panic="abort"` (worse).
+
+**Remaining gap and the only plausible levers:** 48k stereo 1.130x, 8k mono 1.171x.  The last kernel with a *possible* SIMD gap is **`celt_inner_prod`** (+1.24 µs vs the C's `celt_inner_prod_sse`; our body is partly packed — mulps/addps plus a scalar tail — and it is shared with the encoder, so a fix would help both directions).  Everything else is at or near parity, partly offset by our being faster in `opus_fft_impl` (−2.43 µs), the `OpusDecoder::decode` output region (−2.54), `quant_partition` (−0.37) and `clt_compute_allocation` (−0.41).  The **encode residuals** (`8k/mono/*/lowdelay`, `12k/mono/*/audio`, 2.4–2.7x) are **unresolved**: the `rintf` fix did not move them (2.650 → 2.691, 2.490 → 2.510, 2.387 → 2.376, all inside noise), consistent with the earlier attribution to other per-sample opus-layer work (`upsample=6` pre-emphasis branch + 960-sample zero-fill, analysis FFT, `pcm_buf` copies); `celt_inner_prod` is a shared candidate.
+
+**Context you need to reproduce any of this** (system `libopus.so.0` is stripped to 105 dynamic symbols, so the reference archive is required for C symbols): throwaway crate linking `oprs` (path) plus a C-side crate statically linking `reference/lib-ref/libopus.a` via build.rs (`cargo:rustc-link-lib=static=opus`); `SIGPROF` handler with `SA_SIGINFO|SA_RESTART` on `setitimer(ITIMER_PROF, 1 ms)`; RIP = `*(u64*)((u8*)ucontext + 168)` (glibc x86_64: `uc_flags`8 + `uc_link`8 + `stack_t`24 = 40, then `gregs[REG_RIP=16]`); decode the `compat/bench` corpus (`packets_*.bin`, same LCG PCM + `bitrate_for`) in a loop; dump RIPs plus `/proc/self/maps`; symbolize with `nm --defined-only --numeric-sort`.  **The base of each object MUST come from its offset-0 mapping, not `start - offset`** — `/proc/self/maps` reports a page-aligned *file offset* that can differ from the page-aligned segment vaddr by one page (this cost a whole C-side profile and is CORRECTION #2 above).  Cross-check sampled RIPs with `gdb info symbol`.
+
+**Gate lines on the final tree:** `all 25 probes are bit-exact`; `ACCEPTANCE: BIT-EXACT` (decoded PCM compared); `315 passed`; `cargo build --release` clean but for 59 pre-existing warnings; `ACCEPTANCE SUITE: all gates passed` (run by the orchestrator on this revision).
+
+#### Two process lessons worth keeping (from the same goal)
+
+1. **Kernel-level wins are not row-level wins.** The `celt_inner_prod`/`dual_inner_prod` intrinsics transcription (and an independent `chunks_exact(4)` variant) made that kernel up to **~2x faster in isolation** (25.1–28.0 → 11.8–16.1 ns/call, in-process A/B against `celt_inner_prod_c`), yet the frame-level `BENCH_FILTER=dec_i16` geomean did not move (1.252 → 1.253) because the kernel is only ~1.24 µs of an ~84 µs frame. The ≥10 %-on-the-dominated-row rule is therefore the right acceptance bar; kernel micro-benchmarks should be used only to explain *why* a row did or did not move. (Root cause of the originally-slow body, worth remembering: `debug_assert!(x.len() >= n)` is compiled out in release, so LLVM had no bound and emitted ~8 bounds compares + 3 scalar loads + `unpcklps`/`movsd` per 4-lane block instead of one `movups` per operand — safe slice loads can silently defeat vectorisation.)
+2. **Announce file ownership, and scope it to files, not directories.** Two agents were given overlapping work and both edited `src/celt/kernels.rs` within minutes; the second agent's `_mm_loadu_ps` version superseded the first agent's `chunks_exact(4)` edit before it could be measured, wasting that work. The orchestrator's instruction ("you are verification-only, so you cannot collide") was true for `src/` in general but said nothing about that specific file. Rule: before editing, an agent must name the file it is taking and treat every un-named file as off-limits; the orchestrator must list the *files* it is handing over, not just the task.
+
+#### THIRD WIN and the final tree of goal-505bb50a: the CELT pitch-xcorr was running as scalar FMA
+
+Stage profiling (`cargo run --release --features stage-timers --example stage_prof`) for `8k/mono/20ms/lowdelay` showed the whole CELT-only anomaly concentrated in one stage:
+```
+celt: pitch search   85.8 us/call   (67 % of the 127 us CELT encode)
+  pf: downsample      7.2
+  pf: pitch_search   59.3
+    ps: xcorr coarse 50.0   <-- the anomaly
+    ps: best coarse   2.1
+    ps: fine loop     4.7
+  pf: remove_doubling 11.1
+  celt: frequency->residual 17.5 / residual quant 12.5
+```
+`objdump` of `celt_pitch_xcorr_hw` explained it exactly: **66 x `vfmadd231ss` (scalar!) + 486 `vmovss` + only 8 `ymm` references** — the "AVX2+FMA" wrapper was being *reached*, but its body was the `[f32; 8]` lane emulation, which LLVM never vectorised, so 58,560 MACs ran at ~1 MAC/instruction (~50 us, 2.5 cycles/MAC) where the C's real `__m256` sequence takes ~5 us.  That single kernel was a **constant ~90 us/frame penalty on every CELT call** (matching the band-count-independent excess measured across 8 k and 48 k rows).
+
+Fix: `xcorr_kernel_avx_hw` transcribed 1:1 with `core::arch::x86_64` `__m256` intrinsics (`_mm256_loadu_ps`/`_mm256_fmadd_ps`/maskload tail/`_mm256_permute2f128_ps`/`_mm256_hadd_ps`), same FMA order and lane layout, emulation kept as the non-AVX2 fallback.  After it: `vfmadd231ss 66 -> 0`, `vfmadd231ps 16`, `probe_kernels` IDENTICAL (2816), all 25 probes bit-exact.
+
+Row-level effect: **this is a PASSING ≥10 % change, not an exception.** The orchestrator's first measurement compared the fixed tree against an *older* results file from a faster machine state and concluded only 3–7 % (and the agent initially reverted the edit on that basis). A controlled back-to-back A/B in one session (`BENCH_FILTER=enc_i16`, fix stashed and unstashed between the two runs; `prof-scratch/bench_before_fix_enc_i16.txt` vs `prof-scratch/bench_after_fix_enc_i16.txt`) gives:
+```
+row                      r before -> after    oprs ns before -> after
+8k/mono/20ms/lowdelay      2.665  -> 1.709     135484 -> 100392   (-25.9 %)
+8k/mono/10ms/lowdelay      2.371  -> 1.772      79598 ->  58408   (-26.6 %)
+12k/mono/20ms/audio        2.443  -> 1.669     152949 -> 101875   (-33.4 %)
+48k/mono/20ms/lowdelay     1.784  -> 1.507     212228 -> 186364   (-12.2 %)
+48k/2ch/20ms/audio         1.655  -> 1.476     459660 -> 397748   (-13.5 %)
+48k/mono/20ms/audio        1.849  -> 1.405     217778 -> 190291   (-12.6 %)
+```
+The audiopus control column itself moved ±11 % between those two runs, so the **ratio** is the arbiter and any comparison across files/sessions (as the orchestrator did) can under- or overstate a change by a factor of several. Methodology lesson: for a candidate fix on this host, always do the stash/unstash A/B in a single session; never judge from two files produced at different times.
+
+After the fix, the stage profile shows the pathology is gone: `ps: xcorr coarse` fell from 50.0 µs to 3.9–5.4 µs, and the remaining `pitch search` (27.6 µs at 10 ms, 41.6 µs at 20 ms) is spread across `pitch_downsample`/`_celt_autocorr` and `remove_doubling` with no single dominant sub-stage left. The encode residual on the dominated rows is therefore now roughly 1.7x (was 2.4–2.7x); further gains would come from those spread stages.   The encode residual is therefore *reduced but not closed* (~2.3–2.6x remains on the 8 k/12 k rows), with the next candidates being `remove_doubling` (11.1 us), `downsample` (7.2 us), `frequency->residual` (17.5 us) and `residual quant` (12.5 us).
+
+**Lesson (same family as the `debug_assert` one):** counting instructions is not evidence of vectorisation.  My earlier check counted 82 `vfmadd`/`vfmsub` in the binary and concluded "FMA is in use where it matters" — but 66 of those were the **scalar `ss`** form.  Always look at the operand form (`ss` vs `ps`, `xmm` vs `ymm`) and at whether the compiler actually emitted the packed instruction for the intrinsic you wrote.
+
+**Final tree for this goal** (`git diff --numstat src`): `src/celt/arch.rs` 28/11 (float2int), `src/celt/kernels.rs` 103/9 (xcorr AVX2), `src/opus/repacketizer.rs` 46/15 (container redesign), plus `docs/progress.md` and `.gitignore`.  All temporary instrumentation was removed (`examples/stage_prof.rs`, the `stage-timers` feature in `Cargo.toml`, and the timer code in `celt_encoder.rs`/`opus/encoder.rs`/`pitch.rs`), and the final revision re-gated clean: **all 25 probes bit-exact, ACCEPTANCE: BIT-EXACT (decoded PCM compared), 315 tests passed**.

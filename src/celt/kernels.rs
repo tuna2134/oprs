@@ -1352,13 +1352,100 @@ pub(crate) fn have_avx2_fma() -> bool {
     }
 }
 
-/// [`xcorr_kernel_avx_body`] compiled for AVX2+FMA: every `f32::mul_add`
-/// becomes one `vfmadd` (single rounding, so the result is bit-identical to the
-/// correctly-rounded `fmaf` of the portable path).
+/// [`xcorr_kernel_avx`] compiled for AVX2+FMA: the C body transcribed with
+/// `core::arch::x86_64` intrinsics.
+///
+/// The portable `[f32; 8]` emulation in [`xcorr_kernel_avx_body`] is
+/// arithmetically identical, but LLVM does **not** vectorise it: inlining it
+/// into `celt_pitch_xcorr_hw` produces scalar code (measured on this build:
+/// 66 `vfmadd231ss`, 486 `vmovss`, only 8 `ymm` references), i.e. about one
+/// multiply-add per instruction.  `run_prefilter`'s coarse pitch search then
+/// costs ~50 us/frame instead of the ~5 us the packed C kernel needs, and the
+/// pitch search is ~67 % of a CELT-only encode frame.  Writing the eight
+/// `__m256` accumulators and the `permute2f128`/`hadd` reduction with the
+/// actual intrinsics reproduces `celt/x86/pitch_avx.c:39` instruction for
+/// instruction (same FMA order, same lane layout), so the result is unchanged.
+///
+/// `x.len() >= len`, `y.len() >= len + 7`: the masked tail reads a full 8-lane
+/// window at `y[len - r + k]`, `k = 0..8`.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn xcorr_kernel_avx_hw(x: &[f32], y: &[f32], sum: &mut [f32; 8], len: i32) {
-    xcorr_kernel_avx_body(x, y, sum, len)
+    use core::arch::x86_64::*;
+
+    debug_assert!(len > 0);
+    debug_assert!(x.len() >= len as usize);
+    debug_assert!(
+        y.len() >= len as usize + 7,
+        "xcorr_kernel_avx: y needs len+7 elements"
+    );
+
+    // SAFETY: `xcorr_kernel_avx_hw` is only called behind `have_avx2_fma()`,
+    // which is the feature requirement of every intrinsic below.  All loads
+    // stay inside the slices: the vector loop runs while `i < len - 7`, so
+    // `x[i..i+8]` and `y[i+k..i+k+8]` (k <= 7) end at `y[i+15] <= y[len+7]`
+    // (contract above), and the masked tail loads the 8-lane window at
+    // `y[len-r..len-r+8]` with `r = len - i in 1..=7`, i.e. within `y[len+7]`.
+    unsafe {
+        let mut s = [_mm256_setzero_ps(); 8];
+        let mut i: i32 = 0;
+        while i < len - 7 {
+            let ii = i as usize;
+            let x0 = _mm256_loadu_ps(x.as_ptr().add(ii));
+            s[0] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii)), s[0]);
+            s[1] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii + 1)), s[1]);
+            s[2] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii + 2)), s[2]);
+            s[3] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii + 3)), s[3]);
+            s[4] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii + 4)), s[4]);
+            s[5] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii + 5)), s[5]);
+            s[6] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii + 6)), s[6]);
+            s[7] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii + 7)), s[7]);
+            i += 8;
+        }
+        if i != len {
+            /* The C does
+               `m = _mm256_loadu_si256((__m256i*)(mask + 7 + i - len));`
+               with `mask = {7 x -1, 8 x 0}`, i.e. the low `len - i` lanes are
+               active; `_mm256_maskload_ps` zeroes the masked-out elements, so
+               those lanes contribute `fma(0, 0, acc) == acc`. */
+            let r = len - i; /* 1..=7 */
+            let m = _mm256_cmpgt_epi32(
+                _mm256_set1_epi32(r),
+                _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7),
+            );
+            let ii = i as usize;
+            let x0 = _mm256_maskload_ps(x.as_ptr().add(ii), m);
+            s[0] = _mm256_fmadd_ps(x0, _mm256_maskload_ps(y.as_ptr().add(ii), m), s[0]);
+            s[1] = _mm256_fmadd_ps(x0, _mm256_maskload_ps(y.as_ptr().add(ii + 1), m), s[1]);
+            s[2] = _mm256_fmadd_ps(x0, _mm256_maskload_ps(y.as_ptr().add(ii + 2), m), s[2]);
+            s[3] = _mm256_fmadd_ps(x0, _mm256_maskload_ps(y.as_ptr().add(ii + 3), m), s[3]);
+            s[4] = _mm256_fmadd_ps(x0, _mm256_maskload_ps(y.as_ptr().add(ii + 4), m), s[4]);
+            s[5] = _mm256_fmadd_ps(x0, _mm256_maskload_ps(y.as_ptr().add(ii + 5), m), s[5]);
+            s[6] = _mm256_fmadd_ps(x0, _mm256_maskload_ps(y.as_ptr().add(ii + 6), m), s[6]);
+            s[7] = _mm256_fmadd_ps(x0, _mm256_maskload_ps(y.as_ptr().add(ii + 7), m), s[7]);
+        }
+        /* 8 horizontal adds, as in the C:
+           permute2f128(0x20) + permute2f128(0x31) -> hadd -> hadd. */
+        let a0 = _mm256_add_ps(
+            _mm256_permute2f128_ps::<{ 2 << 4 }>(s[0], s[4]),
+            _mm256_permute2f128_ps::<{ 1 | (3 << 4) }>(s[0], s[4]),
+        );
+        let a1 = _mm256_add_ps(
+            _mm256_permute2f128_ps::<{ 2 << 4 }>(s[1], s[5]),
+            _mm256_permute2f128_ps::<{ 1 | (3 << 4) }>(s[1], s[5]),
+        );
+        let a2 = _mm256_add_ps(
+            _mm256_permute2f128_ps::<{ 2 << 4 }>(s[2], s[6]),
+            _mm256_permute2f128_ps::<{ 1 | (3 << 4) }>(s[2], s[6]),
+        );
+        let a3 = _mm256_add_ps(
+            _mm256_permute2f128_ps::<{ 2 << 4 }>(s[3], s[7]),
+            _mm256_permute2f128_ps::<{ 1 | (3 << 4) }>(s[3], s[7]),
+        );
+        let b0 = _mm256_hadd_ps(a0, a1);
+        let b1 = _mm256_hadd_ps(a2, a3);
+        _mm256_storeu_ps(sum.as_mut_ptr(), _mm256_hadd_ps(b0, b1));
+    }
 }
 
 /// `celt/x86/pitch_avx.c:39` `xcorr_kernel_avx` (static in the C), dispatched at
@@ -1393,9 +1480,14 @@ pub fn celt_pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: i32, max_p
     celt_pitch_xcorr_avx2_body(x, y, xcorr, len, max_pitch)
 }
 
-/// [`celt_pitch_xcorr_avx2_body`] compiled for AVX2+FMA, so that the 8-lag
-/// [`xcorr_kernel_avx_body`] inlined into it uses real `vfmadd`/256-bit
-/// registers (the C's `-mavx2 -mfma` translation unit).
+/// [`celt_pitch_xcorr_avx2_body`] compiled for AVX2+FMA.
+///
+/// The C compiles this function and its `static xcorr_kernel_avx` in the same
+/// `-mavx2 -mfma` translation unit, so the 8-lag kernel is inlined and uses
+/// packed `vfmadd`.  Here the kernel is the dispatching [`xcorr_kernel_avx`],
+/// whose AVX2+FMA arm is the intrinsic [`xcorr_kernel_avx_hw`]; this wrapper
+/// exists so that arm is reachable (an earlier version called
+/// `xcorr_kernel_avx_body` directly, which LLVM scalarised).
 ///
 /// Bit-exactness: AVX2/FMA change neither the rounding (FMA keeps its single
 /// rounding) nor the operation order of the transliterated C.
@@ -1406,7 +1498,9 @@ unsafe fn celt_pitch_xcorr_hw(x: &[f32], y: &[f32], xcorr: &mut [f32], len: i32,
 }
 
 /// The body of the AVX2 `celt_pitch_xcorr`, shared by the hardware-FMA path and
-/// the portable fallback.
+/// the portable fallback: 8 lags at a time with [`xcorr_kernel_avx`] (the C's
+/// `static xcorr_kernel_avx`, which the C inlines into `celt_pitch_xcorr_avx2`),
+/// then the remaining `max_pitch mod 8` lags one at a time.
 #[inline(always)]
 fn celt_pitch_xcorr_avx2_body(x: &[f32], y: &[f32], xcorr: &mut [f32], len: i32, max_pitch: i32) {
     debug_assert!(max_pitch > 0);
@@ -1418,7 +1512,7 @@ fn celt_pitch_xcorr_avx2_body(x: &[f32], y: &[f32], xcorr: &mut [f32], len: i32,
     while i < max_pitch - 7 {
         let ii = i as usize;
         let mut sum = [0.0f32; 8];
-        xcorr_kernel_avx_body(x, &y[ii..], &mut sum, len);
+        xcorr_kernel_avx(x, &y[ii..], &mut sum, len);
         for k in 0..8 {
             xcorr[ii + k] = sum[k];
         }
