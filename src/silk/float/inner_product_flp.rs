@@ -98,12 +98,12 @@ pub fn silk_inner_product_FLP_avx2(
     /* The reference build compiles `inner_product_FLP_avx2.c` with `-mavx
        -mfma`, so the C's `_mm256_fmadd_pd` is one hardware instruction.  On the
        port's x86-64 baseline `f64::mul_add` instead lowers to a call to
-       compiler-builtins' correctly-rounded `fma`, which is exactly the same
-       value but several times the cost.  Select the hardware form at run time
-       the way the C's RTCD table does, and keep the emulation as the fallback
-       for hosts without AVX2+FMA. */
+       compiler-builtins' correctly-rounded `fma`, which is the same value but
+       several times the cost.  Select the hardware form at run time the way the
+       C's RTCD table does, and keep the emulation as the fallback for hosts
+       without AVX2+FMA. */
     #[cfg(target_arch = "x86_64")]
-    if false && crate::celt::kernels::have_avx2_fma() {
+    if crate::celt::kernels::have_avx2_fma() {
         // SAFETY: guarded by `have_avx2_fma()`.
         return unsafe { silk_inner_product_FLP_avx2_hw(data1, data2, dataSize) };
     }

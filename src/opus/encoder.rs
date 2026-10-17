@@ -4534,10 +4534,13 @@ static layer2: AnalysisDenseLayer = AnalysisDenseLayer {
     ) {
         let N = 480;
         let N2 = 240;
-        let mut in_ = vec![kiss_fft_cpx::default(); 480];
-        let mut out = vec![kiss_fft_cpx::default(); 480];
-        let mut tonality = vec![0.0f32; 240];
-        let mut noisiness = vec![0.0f32; 240];
+        /* `VARDECL(kiss_fft_cpx, in_/out); ALLOC(..., 480, ...)` and
+           `VARDECL(float, tonality/noisiness); ALLOC(..., 240, ...)` — the C
+           sizes are compile-time constants here, so these are stack arrays. */
+        let mut in_ = [kiss_fft_cpx::default(); 480];
+        let mut out = [kiss_fft_cpx::default(); 480];
+        let mut tonality = [0.0f32; 240];
+        let mut noisiness = [0.0f32; 240];
         let mut band_tonality = [0.0f32; NB_TBANDS as usize];
         let mut logE = [0.0f32; NB_TBANDS as usize];
         let mut BFCC = [0.0f32; 8];

@@ -431,11 +431,18 @@ fn comb_filter_impl(
     let rem = N - i;
     let base = i; /* `comb_filter_const(y+i, x+i, ...)`: the tail starts at `i` */
     let mut b: i32 = 0;
+    /* The per-chunk window copy of the C's aliased read (`comb_filter_const`
+       takes `&mut y` and `&x` over the same buffer, which Rust cannot express).
+       The C has no allocation here at all; the size is the C bound
+       `IMIN(12, rem) + T1 + 2 <= 12 + COMBFILTER_MAXPERIOD + 2`, so this is
+       stack storage rather than a fresh `Vec` per chunk. */
+    let mut w_storage = [0.0f32; 12 + COMBFILTER_MAXPERIOD as usize + 2];
     while b < rem {
         let m = IMIN(12, rem - b);
         let wstart = x_off + (base + b) as usize - T1u - 2;
         let wlen = (m + T1 + 2) as usize;
-        let w: Vec<f32> = buf[wstart..wstart + wlen].to_vec();
+        let w = &mut w_storage[..wlen];
+        w.copy_from_slice(&buf[wstart..wstart + wlen]);
         let ystart = y_off + (base + b) as usize;
         comb_filter_const(
             &mut buf[ystart..ystart + m as usize],
@@ -488,8 +495,14 @@ pub fn comb_filter(
     debug_assert!(y.len() >= n, "comb_filter: y needs N samples");
     debug_assert!(overlap >= 0 && overlap <= N);
     /* The x and y regions must be disjoint in the shared scratch buffer: in C
-       the two buffers never overlap when `x != y`. */
-    let mut buf = vec![0f32; h + 2 * n];
+       the two buffers never overlap when `x != y`.
+       `h = IMAX(IMAX(T0,T1),COMBFILTER_MINPERIOD)+2 <= COMBFILTER_MAXPERIOD+2`
+       and `n = N <= MAX_CELT_FRAME`, so the C's ad-hoc `buf` (which the C does
+       not allocate at all — it aliases the caller's arrays) is stack storage. */
+    debug_assert!(h <= COMBFILTER_MAXPERIOD as usize + 2, "comb_filter: T0/T1 too large");
+    debug_assert!(n <= MAX_CELT_FRAME, "comb_filter: N too large");
+    let mut buf_storage = [0f32; COMBFILTER_MAXPERIOD as usize + 2 + 2 * MAX_CELT_FRAME];
+    let mut buf = &mut buf_storage[..h + 2 * n];
     buf[..h + n].copy_from_slice(&x[..h + n]);
     comb_filter_impl(
         &mut buf, h, h + n, T0, T1, N, g0, g1, tapset0, tapset1, window, overlap, arch,

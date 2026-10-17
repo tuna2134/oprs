@@ -1535,9 +1535,28 @@ fn silk_nsq_del_dec_scale_states_avx2(
     }
 }
 
-/// `silk_noise_shape_quantizer_del_dec_avx2`
+/// True when the host can execute the AVX2 form of the delayed-decision noise
+/// shaper (the C's `x86_silk_map.c` RTCD condition for the arch-4 slot).
+///
+/// `is_x86_feature_detected!` caches its answer in a relaxed atomic after the
+/// first `cpuid`, so this is a load, not a re-detection.
+#[inline]
+fn have_avx2() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// `silk_noise_shape_quantizer_del_dec_avx2` — the scalar lane-vector emulation
+/// that is the fallback of [`silk_noise_shape_quantizer_del_dec_avx2`] and the
+/// specification for the intrinsic transcription in [`avx2_hw`].
 #[allow(clippy::too_many_arguments)]
-fn silk_noise_shape_quantizer_del_dec_avx2(
+fn silk_noise_shape_quantizer_del_dec_avx2_body(
     NSQ: &mut silk_nsq_state,
     psDelDec: &mut NSQ_del_dec_struct_avx2,
     signalType: opus_int,
@@ -1847,6 +1866,109 @@ fn silk_noise_shape_quantizer_del_dec_avx2(
     for i in 0..NSQ_LPC_BUF_LENGTH as usize {
         psDelDec.sLPC_Q14[i] = psDelDec.sLPC_Q14[i + length as usize];
     }
+}
+
+/// `silk_noise_shape_quantizer_del_dec_avx2` (C:633) — dispatcher: the real
+/// AVX2 intrinsics when the host supports them (the same condition the C's
+/// RTCD table tests at start-up), otherwise the lane-vector emulation above.
+#[allow(clippy::too_many_arguments)]
+fn silk_noise_shape_quantizer_del_dec_avx2(
+    NSQ: &mut silk_nsq_state,
+    psDelDec: &mut NSQ_del_dec_struct_avx2,
+    signalType: opus_int,
+    x_Q10: &[opus_int32],
+    pulses: &mut [opus_int8],
+    pulse_base: opus_int,
+    xq_off: opus_int,
+    sLTP_Q15: &mut [opus_int32],
+    delayedGain_Q10: &mut [opus_int32],
+    a_Q12: &[opus_int16],
+    b_Q14: &[opus_int16],
+    AR_shp_Q13: &[opus_int16],
+    lag: opus_int,
+    HarmShapeFIRPacked_Q14: opus_int32,
+    Tilt_Q14: opus_int,
+    LF_shp_Q14: opus_int32,
+    Gain_Q16: opus_int32,
+    Lambda_Q10: opus_int,
+    offset_Q10: opus_int,
+    length: opus_int,
+    subfr: opus_int,
+    shapingLPCOrder: opus_int,
+    predictLPCOrder: opus_int,
+    warping_Q16: opus_int,
+    MaskDelDec: M128,
+    smpl_buf_idx: &mut opus_int,
+    decisionDelay: opus_int,
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if have_avx2() {
+            /* SAFETY: guarded by `have_avx2()`; `ld128` only reinterprets the
+               16-byte `M128` lane vector as `__m128i`. */
+            unsafe {
+                avx2_hw::silk_noise_shape_quantizer_del_dec_avx2_hw(
+                    NSQ,
+                    psDelDec,
+                    signalType,
+                    x_Q10,
+                    pulses,
+                    pulse_base,
+                    xq_off,
+                    sLTP_Q15,
+                    delayedGain_Q10,
+                    a_Q12,
+                    b_Q14,
+                    AR_shp_Q13,
+                    lag,
+                    HarmShapeFIRPacked_Q14,
+                    Tilt_Q14,
+                    LF_shp_Q14,
+                    Gain_Q16,
+                    Lambda_Q10,
+                    offset_Q10,
+                    length,
+                    subfr,
+                    shapingLPCOrder,
+                    predictLPCOrder,
+                    warping_Q16,
+                    avx2_hw::ld128(MaskDelDec),
+                    smpl_buf_idx,
+                    decisionDelay,
+                );
+            }
+            return;
+        }
+    }
+    silk_noise_shape_quantizer_del_dec_avx2_body(
+        NSQ,
+        psDelDec,
+        signalType,
+        x_Q10,
+        pulses,
+        pulse_base,
+        xq_off,
+        sLTP_Q15,
+        delayedGain_Q10,
+        a_Q12,
+        b_Q14,
+        AR_shp_Q13,
+        lag,
+        HarmShapeFIRPacked_Q14,
+        Tilt_Q14,
+        LF_shp_Q14,
+        Gain_Q16,
+        Lambda_Q10,
+        offset_Q10,
+        length,
+        subfr,
+        shapingLPCOrder,
+        predictLPCOrder,
+        warping_Q16,
+        MaskDelDec,
+        smpl_buf_idx,
+        decisionDelay,
+    );
 }
 
 /// `_mm256_castsi256_si128`
@@ -2238,6 +2360,630 @@ pub fn silk_NSQ_del_dec_sse4_1(
         Lambda_Q10,
         LTP_scale_Q14,
     );
+}
+
+// ===========================================================================
+// `silk/x86/NSQ_del_dec_avx2.c` — real AVX2 intrinsics
+// ===========================================================================
+
+/// Intrinsic transcription of the `__m128i`/`__m256i` operations of
+/// `reference/opus-1.6.1/silk/x86/NSQ_del_dec_avx2.c`.
+///
+/// Every item below is an `unsafe fn` carrying
+/// `#[target_feature(enable = "avx2")]`, so it can only be reached through the
+/// dispatchers in the parent module, which check [`have_avx2`] first (the
+/// condition the reference RTCD table already evaluated).  Each helper names
+/// the C `OPUS_INLINE` function it mirrors and its line in the C file; the
+/// bodies are intrinsic-for-intrinsic transliterations in the same order.
+///
+/// The lane vectors of the emulation (`M128` = `[i32; 4]`, `M256` =
+/// `[i32; 8]`) are the storage of `NSQ_del_dec_struct_avx2`, so the intrinsic
+/// code reuses the very same struct through [`ld128`]/[`st128`] bit casts and
+/// both paths stay reachable (and byte-identical) on the same data.
+#[cfg(target_arch = "x86_64")]
+mod avx2_hw {
+    #![allow(unsafe_op_in_unsafe_fn)]
+    use super::*;
+    use core::arch::x86_64::*;
+
+    /// `M128` -> `__m128i`: both are exactly 16 bytes, so this is a bit cast
+    /// (no instruction).
+    #[inline(always)]
+    pub(super) fn ld128(p: M128) -> __m128i {
+        unsafe { core::mem::transmute(p) }
+    }
+    /// `__m128i` -> `M128`, the inverse bit cast, so the intrinsic path and the
+    /// emulation share `NSQ_del_dec_struct_avx2`'s `[i32; 4]` fields.
+    #[inline(always)]
+    fn st128(v: __m128i) -> M128 {
+        unsafe { core::mem::transmute(v) }
+    }
+
+    // -- helpers, in the order of `NSQ_del_dec_avx2.c` ----------------------
+
+    /// `silk_cvtepi64_epi32_high` (C:88) — the high 32 bits of each 64-bit lane
+    /// of four, packed into the low 128 bits.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_cvtepi64_epi32_high(num: __m256i) -> __m128i {
+        _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(
+            num,
+            _mm256_set_epi32(0, 0, 0, 0, 7, 5, 3, 1),
+        ))
+    }
+
+    /// `silk_mm_srai_round_epi32` (C:135).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_srai_round<const BITS: i32>(a: __m128i) -> __m128i {
+        silk_assert!(BITS > 0 && BITS < 31);
+        _mm_srai_epi32::<BITS>(_mm_add_epi32(a, _mm_set1_epi32(1 << (BITS - 1))))
+    }
+
+    /// `silk_mm_add_sat_epi32` (C:142).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_add_sat(a: __m128i, b: __m128i) -> __m128i {
+        let r = _mm_add_epi32(a, b);
+        let of = _mm_and_si128(_mm_xor_si128(a, r), _mm_xor_si128(b, r));
+        let sat = _mm_add_epi32(_mm_srli_epi32::<31>(a), _mm_set1_epi32(0x7FFF_FFFF));
+        _mm_blendv_epi8(r, sat, _mm_srai_epi32::<31>(of))
+    }
+
+    /// `silk_mm_sub_sat_epi32` (C:149).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_sub_sat(a: __m128i, b: __m128i) -> __m128i {
+        let r = _mm_sub_epi32(a, b);
+        let of = _mm_andnot_si128(_mm_xor_si128(b, r), _mm_xor_si128(a, r));
+        let sat = _mm_add_epi32(_mm_srli_epi32::<31>(a), _mm_set1_epi32(0x7FFF_FFFF));
+        _mm_blendv_epi8(r, sat, _mm_srai_epi32::<31>(of))
+    }
+
+    /// `silk_mm256_sub_sat_epi32` (C:156).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h256_sub_sat(a: __m256i, b: __m256i) -> __m256i {
+        let r = _mm256_sub_epi32(a, b);
+        let of = _mm256_andnot_si256(_mm256_xor_si256(b, r), _mm256_xor_si256(a, r));
+        let sat = _mm256_add_epi32(_mm256_srli_epi32::<31>(a), _mm256_set1_epi32(0x7FFF_FFFF));
+        _mm256_blendv_epi8(r, sat, _mm256_srai_epi32::<31>(of))
+    }
+
+    /// `silk_mm_limit_epi32` (C:164).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_limit(num: __m128i, limit1: opus_int32, limit2: opus_int32) -> __m128i {
+        let lo = if limit1 < limit2 { limit1 } else { limit2 };
+        let hi = if limit1 > limit2 { limit1 } else { limit2 };
+        _mm_max_epi32(_mm_min_epi32(num, _mm_set1_epi32(hi)), _mm_set1_epi32(lo))
+    }
+
+    /// `silk_mm_sign_epi32` (C:175) — `cond < 0 ? -num : num`.  The `| 1`
+    /// keeps the operand non-zero, so `_mm_sign_epi32`'s zero case is dead.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_sign(num: __m128i, cond: __m128i) -> __m128i {
+        _mm_sign_epi32(num, _mm_or_si128(cond, _mm_set1_epi32(1)))
+    }
+
+    /// `silk_mm256_sign_epi32` (C:179).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h256_sign(num: __m256i, cond: __m256i) -> __m256i {
+        _mm256_sign_epi32(num, _mm256_or_si256(cond, _mm256_set1_epi32(1)))
+    }
+
+    /// `silk_mm_smulwb_epi32` (C:191) — `(a32 * (opus_int32)((opus_int16)b)) >> 16`.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_smulwb(a: __m128i, b: opus_int32) -> __m128i {
+        h_cvtepi64_epi32_high(_mm256_mul_epi32(
+            _mm256_cvtepi32_epi64(a),
+            _mm256_set1_epi32(((b as u32) << 16) as i32),
+        ))
+    }
+
+    /// `silk_mm256_smulbb_epi32` (C:197) — `(int16)a * (int16)b` per 32-bit lane.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h256_smulbb(a: __m256i, b: __m256i) -> __m256i {
+        let msk = _mm256_set_epi8(
+            -1, -1, -1, -1, -1, -1, -1, -1, 13, 12, 9, 8, 5, 4, 1, 0, -1, -1, -1, -1, -1, -1, -1,
+            -1, 13, 12, 9, 8, 5, 4, 1, 0,
+        );
+        let lo = _mm256_shuffle_epi8(_mm256_mullo_epi16(a, b), msk);
+        let hi = _mm256_shuffle_epi8(_mm256_mulhi_epi16(a, b), msk);
+        _mm256_unpacklo_epi16(lo, hi)
+    }
+
+    /// `silk_mm_hmin_epi32` (C:225) — result is broadcast to all four lanes.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_hmin(num: __m128i) -> __m128i {
+        let num = _mm_min_epi32(num, _mm_shuffle_epi32::<0x4E>(num)); /* 0123 -> 2301 */
+        _mm_min_epi32(num, _mm_shuffle_epi32::<0xB1>(num)) /* 0123 -> 1032 */
+    }
+
+    /// `silk_mm_hmax_epi32` (C:232).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_hmax(num: __m128i) -> __m128i {
+        let num = _mm_max_epi32(num, _mm_shuffle_epi32::<0x4E>(num));
+        _mm_max_epi32(num, _mm_shuffle_epi32::<0xB1>(num))
+    }
+
+    /// `silk_mm_mask_hmin_epi32` (C:239).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_mask_hmin(num: __m128i, mask: __m128i) -> __m128i {
+        h_hmin(_mm_blendv_epi8(num, _mm_set1_epi32(silk_int32_MAX), mask))
+    }
+
+    /// `silk_mm_mask_hmax_epi32` (C:245).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_mask_hmax(num: __m128i, mask: __m128i) -> __m128i {
+        h_hmax(_mm_blendv_epi8(num, _mm_set1_epi32(silk_int32_MIN), mask))
+    }
+
+    /// `silk_mm256_rand_epi32` (C:251).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h256_rand(seed: __m128i) -> __m128i {
+        _mm_add_epi32(
+            _mm_mullo_epi32(seed, _mm_set1_epi32(RAND_MULTIPLIER)),
+            _mm_set1_epi32(RAND_INCREMENT),
+        )
+    }
+
+    /// `silk_index_of_first_equal_epi32` (C:258).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_index_of_first_equal(a: __m128i, b: __m128i) -> opus_int32 {
+        let mask = (_mm_movemask_epi8(_mm_cmpeq_epi32(a, b)) as u32) & 0x1111;
+        silk_assert!(mask != 0);
+        (mask.trailing_zeros() >> 2) as opus_int32
+    }
+
+    /// `silk_index_to_selector` (C:265).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_index_to_selector(index: opus_int32) -> __m128i {
+        silk_assert!(index < 4);
+        let index = index << 2;
+        _mm_set_epi8(
+            (index + 3) as i8,
+            (index + 2) as i8,
+            (index + 1) as i8,
+            (index + 0) as i8,
+            (index + 3) as i8,
+            (index + 2) as i8,
+            (index + 1) as i8,
+            (index + 0) as i8,
+            (index + 3) as i8,
+            (index + 2) as i8,
+            (index + 1) as i8,
+            (index + 0) as i8,
+            (index + 3) as i8,
+            (index + 2) as i8,
+            (index + 1) as i8,
+            (index + 0) as i8,
+        )
+    }
+
+    /// `silk_select_winner` (C:276).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_select_winner(num: __m128i, selector: __m128i) -> opus_int32 {
+        _mm_cvtsi128_si32(_mm_shuffle_epi8(num, selector))
+    }
+
+    /// One accumulation step of
+    /// `silk_noise_shape_quantizer_short_prediction_x4` (C:607-625): the
+    /// coefficient is shifted left 16 bits so that the *high* 32 bits of the
+    /// 64-bit product are `(x * (int16)coef) >> 16`, and the 32-bit lane adds
+    /// keep the low and high words independent, exactly like the C.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_tap(out: __m256i, x: M128, coef: opus_int16) -> __m256i {
+        _mm256_add_epi32(
+            out,
+            _mm256_mul_epi32(
+                _mm256_cvtepi32_epi64(ld128(x)),
+                _mm256_set1_epi32((coef as i32) << 16),
+            ),
+        )
+    }
+
+    /// `silk_noise_shape_quantizer_short_prediction_x4` (C:600), unrolled for
+    /// `order` 10 or 16 exactly as the C.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn h_short_prediction_x4(
+        buf32: &[M128],
+        pos: opus_int,
+        coef16: &[opus_int16],
+        order: opus_int,
+    ) -> __m128i {
+        silk_assert!(order == 10 || order == 16);
+        /* Avoids introducing a bias because silk_SMLAWB() always rounds to -inf */
+        let mut out = _mm256_set1_epi32(order >> 1);
+        out = h_tap(out, buf32[(pos - 0) as usize], coef16[0]);
+        out = h_tap(out, buf32[(pos - 1) as usize], coef16[1]);
+        out = h_tap(out, buf32[(pos - 2) as usize], coef16[2]);
+        out = h_tap(out, buf32[(pos - 3) as usize], coef16[3]);
+        out = h_tap(out, buf32[(pos - 4) as usize], coef16[4]);
+        out = h_tap(out, buf32[(pos - 5) as usize], coef16[5]);
+        out = h_tap(out, buf32[(pos - 6) as usize], coef16[6]);
+        out = h_tap(out, buf32[(pos - 7) as usize], coef16[7]);
+        out = h_tap(out, buf32[(pos - 8) as usize], coef16[8]);
+        out = h_tap(out, buf32[(pos - 9) as usize], coef16[9]);
+        if order == 16 {
+            out = h_tap(out, buf32[(pos - 10) as usize], coef16[10]);
+            out = h_tap(out, buf32[(pos - 11) as usize], coef16[11]);
+            out = h_tap(out, buf32[(pos - 12) as usize], coef16[12]);
+            out = h_tap(out, buf32[(pos - 13) as usize], coef16[13]);
+            out = h_tap(out, buf32[(pos - 14) as usize], coef16[14]);
+            out = h_tap(out, buf32[(pos - 15) as usize], coef16[15]);
+        }
+        h_cvtepi64_epi32_high(out)
+    }
+
+    /// `silk_noise_shape_quantizer_del_dec_avx2` (C:633) — the vector body.
+    #[allow(clippy::too_many_arguments)]
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn silk_noise_shape_quantizer_del_dec_avx2_hw(
+        NSQ: &mut silk_nsq_state,
+        psDelDec: &mut NSQ_del_dec_struct_avx2,
+        signalType: opus_int,
+        x_Q10: &[opus_int32],
+        pulses: &mut [opus_int8],
+        pulse_base: opus_int,
+        xq_off: opus_int,
+        sLTP_Q15: &mut [opus_int32],
+        delayedGain_Q10: &mut [opus_int32],
+        a_Q12: &[opus_int16],
+        b_Q14: &[opus_int16],
+        AR_shp_Q13: &[opus_int16],
+        lag: opus_int,
+        HarmShapeFIRPacked_Q14: opus_int32,
+        Tilt_Q14: opus_int,
+        LF_shp_Q14: opus_int32,
+        Gain_Q16: opus_int32,
+        Lambda_Q10: opus_int,
+        offset_Q10: opus_int,
+        length: opus_int,
+        subfr: opus_int,
+        shapingLPCOrder: opus_int,
+        predictLPCOrder: opus_int,
+        warping_Q16: opus_int,
+        MaskDelDec: __m128i,
+        smpl_buf_idx: &mut opus_int,
+        decisionDelay: opus_int,
+    ) {
+        let mut shp_lag_ptr: opus_int = NSQ.sLTP_shp_buf_idx - lag + HARM_SHAPE_FIR_TAPS / 2;
+        let mut pred_lag_ptr: opus_int = NSQ.sLTP_buf_idx - lag + LTP_ORDER / 2;
+        let Gain_Q10: opus_int32 = Gain_Q16 >> 6;
+
+        for i in 0..length {
+            /* Long-term prediction (C:695-711) */
+            let LTP_pred_Q14: opus_int32 = if signalType == TYPE_VOICED {
+                /* Unrolled loop */
+                /* Avoids introducing a bias because silk_SMLAWB() always rounds to -inf */
+                let mut v: opus_int32 = 2;
+                v += silk_SMULWB(sLTP_Q15[(pred_lag_ptr - 0) as usize], b_Q14[0] as opus_int32);
+                v += silk_SMULWB(sLTP_Q15[(pred_lag_ptr - 1) as usize], b_Q14[1] as opus_int32);
+                v += silk_SMULWB(sLTP_Q15[(pred_lag_ptr - 2) as usize], b_Q14[2] as opus_int32);
+                v += silk_SMULWB(sLTP_Q15[(pred_lag_ptr - 3) as usize], b_Q14[3] as opus_int32);
+                v += silk_SMULWB(sLTP_Q15[(pred_lag_ptr - 4) as usize], b_Q14[4] as opus_int32);
+                pred_lag_ptr += 1;
+                silk_LSHIFT(v, 1) /* Q13 -> Q14 */
+            } else {
+                0
+            };
+
+            /* Long-term shaping (C:714-726) */
+            let n_LTP_Q14: opus_int32 = if lag > 0 {
+                /* Symmetric, packed FIR coefficients */
+                let mut v = silk_add_sat32(
+                    NSQ.sLTP_shp_Q14[(shp_lag_ptr + 0) as usize],
+                    NSQ.sLTP_shp_Q14[(shp_lag_ptr - 2) as usize],
+                );
+                v = silk_SMULWB(v, HarmShapeFIRPacked_Q14);
+                v += silk_SMULWT(
+                    NSQ.sLTP_shp_Q14[(shp_lag_ptr - 1) as usize],
+                    HarmShapeFIRPacked_Q14,
+                );
+                shp_lag_ptr += 1;
+                LTP_pred_Q14 - silk_LSHIFT(v, 2) /* Q12 -> Q14 */
+            } else {
+                0
+            };
+
+            /* BEGIN Updating Delayed Decision States (C:728-834) */
+
+            /* Generate dither (C:731) */
+            let seed = h256_rand(ld128(psDelDec.Seed));
+            psDelDec.Seed = st128(seed);
+
+            /* Short-term prediction (C:734-735) */
+            let mut LPC_pred_Q14 = h_short_prediction_x4(
+                &psDelDec.sLPC_Q14,
+                NSQ_LPC_BUF_LENGTH - 1 + i,
+                a_Q12,
+                predictLPCOrder,
+            );
+            LPC_pred_Q14 = _mm_slli_epi32::<4>(LPC_pred_Q14); /* Q10 -> Q14 */
+
+            /* Noise shape feedback (C:738-756) */
+            silk_assert!(shapingLPCOrder > 0);
+            silk_assert!((shapingLPCOrder & 1) == 0); /* check that order is even */
+            /* Output of lowpass section */
+            let mut tmp0 = _mm_add_epi32(
+                ld128(psDelDec.Diff_Q14),
+                h_smulwb(ld128(psDelDec.sAR2_Q14[0]), warping_Q16),
+            );
+            let mut n_AR_Q14 = _mm_set1_epi32(shapingLPCOrder >> 1);
+            for j in 0..(shapingLPCOrder - 1) as usize {
+                /* Output of allpass section */
+                let tmp1 = ld128(psDelDec.sAR2_Q14[j]);
+                psDelDec.sAR2_Q14[j] = st128(tmp0);
+                n_AR_Q14 = _mm_add_epi32(n_AR_Q14, h_smulwb(tmp0, AR_shp_Q13[j] as opus_int32));
+                tmp0 = _mm_add_epi32(
+                    tmp1,
+                    h_smulwb(
+                        _mm_sub_epi32(ld128(psDelDec.sAR2_Q14[j + 1]), tmp0),
+                        warping_Q16,
+                    ),
+                );
+            }
+            psDelDec.sAR2_Q14[(shapingLPCOrder - 1) as usize] = st128(tmp0);
+            n_AR_Q14 = _mm_add_epi32(
+                n_AR_Q14,
+                h_smulwb(tmp0, AR_shp_Q13[(shapingLPCOrder - 1) as usize] as opus_int32),
+            );
+
+            let mut n_AR_Q14 = _mm_slli_epi32::<1>(n_AR_Q14); /* Q11 -> Q12 */
+            n_AR_Q14 =
+                _mm_add_epi32(n_AR_Q14, h_smulwb(ld128(psDelDec.LF_AR_Q14), Tilt_Q14)); /* Q12 */
+            let n_AR_Q14 = _mm_slli_epi32::<2>(n_AR_Q14); /* Q12 -> Q14 */
+
+            let tmp0 = h_smulwb(
+                ld128(psDelDec.Samples[*smpl_buf_idx as usize].Shape_Q14),
+                LF_shp_Q14,
+            ); /* Q12 */
+            let tmp1 =
+                h_smulwb(ld128(psDelDec.LF_AR_Q14), LF_shp_Q14 >> 16); /* Q12 */
+            let n_LF_Q14 = _mm_slli_epi32::<2>(_mm_add_epi32(tmp0, tmp1)); /* Q12 -> Q14 */
+
+            /* Input minus prediction plus noise feedback (C:763-770) */
+            /* r = x[ i ] - LTP_pred - LPC_pred + n_AR + n_Tilt + n_LF + n_LTP  */
+            let tmp0 = h_add_sat(n_AR_Q14, n_LF_Q14); /* Q14 */
+            let tmp1 = _mm_add_epi32(_mm_set1_epi32(n_LTP_Q14), LPC_pred_Q14); /* Q13 */
+            let tmp0 = h_srai_round::<4>(h_sub_sat(tmp1, tmp0)); /* Q10 */
+
+            let r_Q10 = _mm_sub_epi32(_mm_set1_epi32(x_Q10[i as usize]), tmp0); /* residual error Q10 */
+
+            /* Flip sign depending on dither (C:773-774) */
+            let r_Q10 = h_sign(r_Q10, ld128(psDelDec.Seed));
+            let mut r_Q10 = h_limit(r_Q10, -(31 << 10), 30 << 10);
+
+            /* Find two quantization level candidates and measure their rate-distortion
+               (C:777-797) */
+            let mut q1_Q10 = _mm_sub_epi32(r_Q10, _mm_set1_epi32(offset_Q10));
+            let mut q1_Q0 = _mm_srai_epi32::<10>(q1_Q10);
+            if Lambda_Q10 > 2048 {
+                /* For aggressive RDO, the bias becomes more than one pulse. */
+                let tmp0 =
+                    _mm_sub_epi32(_mm_abs_epi32(q1_Q10), _mm_set1_epi32(Lambda_Q10 / 2 - 512)); /* rdo_offset */
+                q1_Q0 = _mm_srai_epi32::<31>(q1_Q10);
+                let tmp1 = _mm_cmpgt_epi32(tmp0, _mm_setzero_si128());
+                let tmp0 = _mm_srai_epi32::<10>(h_sign(tmp0, q1_Q10));
+                q1_Q0 = _mm_blendv_epi8(q1_Q0, tmp0, tmp1);
+            }
+
+            /* NOTE: this is `_mm_sign_epi32` itself (C:789), not the
+               `silk_mm_sign_epi32` wrapper: a zero `q1_Q0` must yield 0. */
+            let tmp0 = _mm_sign_epi32(_mm_set1_epi32(QUANT_LEVEL_ADJUST_Q10), q1_Q0);
+            q1_Q10 = _mm_sub_epi32(_mm_slli_epi32::<10>(q1_Q0), tmp0);
+            q1_Q10 = _mm_add_epi32(q1_Q10, _mm_set1_epi32(offset_Q10));
+
+            /* check if q1_Q0 is 0 or -1 (C:793-798) */
+            let tmp0 = _mm_add_epi32(_mm_srli_epi32::<31>(q1_Q0), q1_Q0);
+            let tmp1 = _mm_cmpeq_epi32(tmp0, _mm_setzero_si128());
+            let tmp0 = _mm_blendv_epi8(
+                _mm_set1_epi32(1024),
+                _mm_set1_epi32(1024 - QUANT_LEVEL_ADJUST_Q10),
+                tmp1,
+            );
+            let q2_Q10 = _mm_add_epi32(q1_Q10, tmp0);
+            let q_Q10 = _mm256_set_m128i(q2_Q10, q1_Q10);
+
+            let mut rr_Q10 = _mm256_sub_epi32(_mm256_broadcastsi128_si256(r_Q10), q_Q10);
+            let mut rd_Q10 = _mm256_abs_epi32(q_Q10);
+            rr_Q10 = h256_smulbb(rr_Q10, rr_Q10);
+            rd_Q10 = h256_smulbb(rd_Q10, _mm256_set1_epi32(Lambda_Q10));
+            rd_Q10 = _mm256_add_epi32(rd_Q10, rr_Q10);
+            let mut rd_Q10 = _mm256_srai_epi32::<10>(rd_Q10);
+
+            let mask = _mm256_broadcastsi128_si256(_mm_cmplt_epi32(
+                _mm256_castsi256_si128(rd_Q10),
+                _mm256_extracti128_si256::<1>(rd_Q10),
+            ));
+            let mut SS_RD_Q10 = _mm256_add_epi32(
+                _mm256_broadcastsi128_si256(ld128(psDelDec.RD_Q10)),
+                _mm256_blendv_epi8(
+                    _mm256_permute2x128_si256::<0x1>(rd_Q10, rd_Q10),
+                    rd_Q10,
+                    mask,
+                ),
+            );
+            let mut SS_Q_Q10 = _mm256_blendv_epi8(
+                _mm256_permute2x128_si256::<0x1>(q_Q10, q_Q10),
+                q_Q10,
+                mask,
+            );
+
+            /* Update states for best and second best quantization (C:819-832) */
+
+            /* Quantized excitation */
+            let mut exc_Q14 = h256_sign(
+                _mm256_slli_epi32::<4>(SS_Q_Q10),
+                _mm256_broadcastsi128_si256(ld128(psDelDec.Seed)),
+            );
+
+            /* Add predictions */
+            exc_Q14 = _mm256_add_epi32(exc_Q14, _mm256_set1_epi32(LTP_pred_Q14));
+            let mut SS_LPC_exc_Q14 = _mm256_slli_epi32::<1>(exc_Q14);
+            let mut SS_xq_Q14 =
+                _mm256_add_epi32(exc_Q14, _mm256_broadcastsi128_si256(LPC_pred_Q14));
+
+            /* Update states */
+            let mut SS_Diff_Q14 = _mm256_sub_epi32(
+                SS_xq_Q14,
+                _mm256_set1_epi32(silk_LSHIFT(x_Q10[i as usize], 4)),
+            );
+            let mut SS_LF_AR_Q14 =
+                _mm256_sub_epi32(SS_Diff_Q14, _mm256_broadcastsi128_si256(n_AR_Q14));
+            let mut SS_sLTP_shp_Q14 =
+                h256_sub_sat(SS_LF_AR_Q14, _mm256_broadcastsi128_si256(n_LF_Q14));
+
+            /* END Updating Delayed Decision States */
+
+            *smpl_buf_idx = (*smpl_buf_idx + DECISION_DELAY - 1) % DECISION_DELAY;
+            let last_smple_idx = (*smpl_buf_idx + decisionDelay) % DECISION_DELAY;
+            let psLastSample = last_smple_idx as usize;
+
+            /* Find winner (C:840-842) */
+            let rmin_lo = _mm256_castsi256_si128(SS_RD_Q10);
+            let RDmin_Q10 = h_mask_hmin(rmin_lo, MaskDelDec);
+            let Winner_selector = h_index_to_selector(h_index_of_first_equal(RDmin_Q10, rmin_lo));
+
+            /* Increase RD values of expired states (C:844-850) */
+            let Winner_rand_state = _mm_shuffle_epi8(
+                ld128(psDelDec.Samples[psLastSample].RandState),
+                Winner_selector,
+            );
+
+            SS_RD_Q10 = _mm256_blendv_epi8(
+                _mm256_add_epi32(SS_RD_Q10, _mm256_set1_epi32(silk_int32_MAX >> 4)),
+                SS_RD_Q10,
+                _mm256_broadcastsi128_si256(_mm_cmpeq_epi32(
+                    ld128(psDelDec.Samples[psLastSample].RandState),
+                    Winner_rand_state,
+                )),
+            );
+
+            /* find worst in first set (C:853) */
+            let RDmax_Q10 = h_mask_hmax(_mm256_extracti128_si256::<0>(SS_RD_Q10), MaskDelDec);
+            /* find best in second set (C:855) */
+            let RDmin_Q10 = h_mask_hmin(_mm256_extracti128_si256::<1>(SS_RD_Q10), MaskDelDec);
+
+            /* Replace a state if best from second set outperforms worst in first set
+               (C:857-895) */
+            let tmp0 = _mm_cmplt_epi32(RDmin_Q10, RDmax_Q10);
+            if _mm_testz_si128(tmp0, tmp0) == 0 {
+                let RDmax_ind =
+                    h_index_of_first_equal(RDmax_Q10, _mm256_extracti128_si256::<0>(SS_RD_Q10));
+                let RDmin_ind =
+                    h_index_of_first_equal(RDmin_Q10, _mm256_extracti128_si256::<1>(SS_RD_Q10));
+                let tmp1 = _mm_cvtepi8_epi32(_mm_cvtsi32_si128(
+                    (0xFFu32 << ((RDmax_ind as u32) << 3)) as i32,
+                ));
+                let tmp0 = _mm_blendv_epi8(
+                    _mm_set_epi8(
+                        15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+                    ),
+                    h_index_to_selector(RDmin_ind),
+                    tmp1,
+                );
+                for t in i as usize..(MAX_SUB_FRAME_LENGTH + NSQ_LPC_BUF_LENGTH) as usize {
+                    psDelDec.sLPC_Q14[t] =
+                        st128(_mm_shuffle_epi8(ld128(psDelDec.sLPC_Q14[t]), tmp0));
+                }
+                let seed = _mm_shuffle_epi8(ld128(psDelDec.Seed), tmp0);
+                psDelDec.Seed = st128(seed);
+                let seed_init = _mm_shuffle_epi8(ld128(psDelDec.SeedInit), tmp0);
+                psDelDec.SeedInit = st128(seed_init);
+                for t in 0..MAX_SHAPE_LPC_ORDER as usize {
+                    psDelDec.sAR2_Q14[t] =
+                        st128(_mm_shuffle_epi8(ld128(psDelDec.sAR2_Q14[t]), tmp0));
+                }
+                for t in 0..DECISION_DELAY as usize {
+                    let s = psDelDec.Samples[t];
+                    psDelDec.Samples[t].RandState =
+                        st128(_mm_shuffle_epi8(ld128(s.RandState), tmp0));
+                    psDelDec.Samples[t].Q_Q10 = st128(_mm_shuffle_epi8(ld128(s.Q_Q10), tmp0));
+                    psDelDec.Samples[t].Xq_Q14 = st128(_mm_shuffle_epi8(ld128(s.Xq_Q14), tmp0));
+                    psDelDec.Samples[t].Pred_Q15 = st128(_mm_shuffle_epi8(ld128(s.Pred_Q15), tmp0));
+                    psDelDec.Samples[t].Shape_Q14 = st128(_mm_shuffle_epi8(ld128(s.Shape_Q14), tmp0));
+                }
+                let mask = _mm256_castsi128_si256(_mm_blendv_epi8(
+                    _mm_set_epi32(0x3, 0x2, 0x1, 0x0),
+                    _mm_set1_epi32(RDmin_ind + 4),
+                    tmp1,
+                ));
+                SS_Q_Q10 = _mm256_permutevar8x32_epi32(SS_Q_Q10, mask);
+                SS_RD_Q10 = _mm256_permutevar8x32_epi32(SS_RD_Q10, mask);
+                SS_xq_Q14 = _mm256_permutevar8x32_epi32(SS_xq_Q14, mask);
+                SS_LF_AR_Q14 = _mm256_permutevar8x32_epi32(SS_LF_AR_Q14, mask);
+                SS_Diff_Q14 = _mm256_permutevar8x32_epi32(SS_Diff_Q14, mask);
+                SS_sLTP_shp_Q14 = _mm256_permutevar8x32_epi32(SS_sLTP_shp_Q14, mask);
+                SS_LPC_exc_Q14 = _mm256_permutevar8x32_epi32(SS_LPC_exc_Q14, mask);
+            }
+
+            /* Write samples from winner to output and long-term filter states
+               (C:897-908) */
+            if subfr > 0 || i >= decisionDelay {
+                let ps = ld128(psDelDec.Samples[psLastSample].Q_Q10);
+                pulses[(pulse_base + i - decisionDelay) as usize] =
+                    silk_sar_round_32(h_select_winner(ps, Winner_selector), 10) as opus_int8;
+                let xq = ld128(psDelDec.Samples[psLastSample].Xq_Q14);
+                NSQ.xq[(xq_off + i - decisionDelay) as usize] = silk_sat16(
+                    silk_sar_round_smulww(
+                        h_select_winner(xq, Winner_selector),
+                        delayedGain_Q10[last_smple_idx as usize],
+                        8,
+                    ) as opus_int32,
+                );
+                NSQ.sLTP_shp_Q14[(NSQ.sLTP_shp_buf_idx - decisionDelay) as usize] =
+                    h_select_winner(
+                        ld128(psDelDec.Samples[psLastSample].Shape_Q14),
+                        Winner_selector,
+                    );
+                sLTP_Q15[(NSQ.sLTP_buf_idx - decisionDelay) as usize] = h_select_winner(
+                    ld128(psDelDec.Samples[psLastSample].Pred_Q15),
+                    Winner_selector,
+                );
+            }
+            NSQ.sLTP_shp_buf_idx += 1;
+            NSQ.sLTP_buf_idx += 1;
+
+            /* Update states (C:912-924) */
+            let psSample = *smpl_buf_idx as usize;
+            let seed = _mm_add_epi32(
+                ld128(psDelDec.Seed),
+                h_srai_round::<10>(_mm256_castsi256_si128(SS_Q_Q10)),
+            );
+            psDelDec.Seed = st128(seed);
+            psDelDec.LF_AR_Q14 = st128(_mm256_castsi256_si128(SS_LF_AR_Q14));
+            psDelDec.Diff_Q14 = st128(_mm256_castsi256_si128(SS_Diff_Q14));
+            psDelDec.sLPC_Q14[(i + NSQ_LPC_BUF_LENGTH) as usize] =
+                st128(_mm256_castsi256_si128(SS_xq_Q14));
+            psDelDec.RD_Q10 = st128(_mm256_castsi256_si128(SS_RD_Q10));
+            psDelDec.Samples[psSample].Xq_Q14 = st128(_mm256_castsi256_si128(SS_xq_Q14));
+            psDelDec.Samples[psSample].Q_Q10 = st128(_mm256_castsi256_si128(SS_Q_Q10));
+            psDelDec.Samples[psSample].Pred_Q15 = st128(_mm256_castsi256_si128(SS_LPC_exc_Q14));
+            psDelDec.Samples[psSample].Shape_Q14 = st128(_mm256_castsi256_si128(SS_sLTP_shp_Q14));
+            psDelDec.Samples[psSample].RandState = psDelDec.Seed;
+            delayedGain_Q10[psSample] = Gain_Q10;
+        }
+        /* Update LPC states (C:926-930) */
+        for i in 0..NSQ_LPC_BUF_LENGTH as usize {
+            psDelDec.sLPC_Q14[i] = psDelDec.sLPC_Q14[i + length as usize];
+        }
+    }
 }
 
 #[cfg(test)]

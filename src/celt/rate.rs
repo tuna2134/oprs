@@ -47,6 +47,7 @@
 //! `wrapping_*` form.
 
 use super::arch::*;
+use super::celt::MAX_NB_EBANDS;
 use super::cwrs::get_required_bits;
 use super::entcode::*;
 use super::entdec::{ec_dec_bit_logp, ec_dec_uint};
@@ -684,10 +685,16 @@ pub fn clt_compute_allocation(
             total -= dual_stereo_rsv;
         }
     }
-    let mut bits1 = vec![0i32; len as usize];
-    let mut bits2 = vec![0i32; len as usize];
-    let mut thresh = vec![0i32; len as usize];
-    let mut trim_offset = vec![0i32; len as usize];
+    /* `VARDECL(int, bits1/bits2/thresh/trim_offset); ALLOC(..., len, int)` —
+       `len` is `m.nbEBands <= MAX_NB_EBANDS`, so these are stack arrays. */
+    let mut bits1_storage = [0i32; MAX_NB_EBANDS];
+    let mut bits1 = &mut bits1_storage[..len as usize];
+    let mut bits2_storage = [0i32; MAX_NB_EBANDS];
+    let mut bits2 = &mut bits2_storage[..len as usize];
+    let mut thresh_storage = [0i32; MAX_NB_EBANDS];
+    let mut thresh = &mut thresh_storage[..len as usize];
+    let mut trim_offset_storage = [0i32; MAX_NB_EBANDS];
+    let mut trim_offset = &mut trim_offset_storage[..len as usize];
 
     for j in start..end {
         /* Below this threshold, we're sure not to allocate any PVQ bits. */

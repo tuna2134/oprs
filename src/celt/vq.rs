@@ -64,6 +64,7 @@
 //! port; `bash compat/scripts/run-probe.sh vq` must print `IDENTICAL`.
 
 use super::arch::*;
+use super::celt::MAX_PVQ_N;
 use super::cwrs::{decode_pulses, encode_pulses};
 use super::entcode::{celt_udiv, ec_ctx};
 use super::kernels;
@@ -273,18 +274,21 @@ pub fn alg_quant(
     celt_assert2!(K > 0, "alg_quant() needs at least one pulse");
     celt_assert2!(N > 1, "alg_quant() needs at least two dimensions");
 
-    /* Covers vectorization by up to 4. */
-    let mut iy = vec![0i32; (N + 3) as usize];
+    /* Covers vectorization by up to 4.  The C `VARDECL(int, iy)` is sized by
+       the mode (`N <= MAX_PVQ_N`), so this is stack storage; the `+3` covers
+       the 4-wide stores `op_pvq_search` performs. */
+    let mut iy_storage = [0i32; MAX_PVQ_N + 3];
+    let iy = &mut iy_storage[..(N + 3) as usize];
 
     exp_rotation(X, N, 1, B, K, spread);
 
     /* `yy = op_pvq_search(X, iy, K, N, arch);` — the `vq.h:63` macro, which
        `x86/vq_sse.h:36-37` overrides to `op_pvq_search_sse2`. */
-    let yy = kernels::op_pvq_search(X, &mut iy, K, N, arch);
-    let collapse_mask = extract_collapse_mask(&iy, N, B);
-    encode_pulses(&iy, N, K, enc);
+    let yy = kernels::op_pvq_search(X, iy, K, N, arch);
+    let collapse_mask = extract_collapse_mask(iy, N, B);
+    encode_pulses(iy, N, K, enc);
     if resynth != 0 {
-        normalise_residual(&iy, X, N, yy, gain, 0);
+        normalise_residual(iy, X, N, yy, gain, 0);
     }
 
     if resynth != 0 {
@@ -307,11 +311,13 @@ pub fn alg_unquant(
     celt_assert2!(K > 0, "alg_unquant() needs at least one pulse");
     celt_assert2!(N > 1, "alg_unquant() needs at least two dimensions");
 
-    let mut iy = vec![0i32; N as usize];
-    let Ryy = decode_pulses(&mut iy, N, K, dec);
-    normalise_residual(&iy, X, N, Ryy, gain, 0);
+    /* `VARDECL(int, iy); ALLOC(iy, N, int);` — `N <= MAX_PVQ_N`, stack. */
+    let mut iy_storage = [0i32; MAX_PVQ_N];
+    let iy = &mut iy_storage[..N as usize];
+    let Ryy = decode_pulses(iy, N, K, dec);
+    normalise_residual(iy, X, N, Ryy, gain, 0);
     exp_rotation(X, N, -1, B, K, spread);
-    extract_collapse_mask(&iy, N, B)
+    extract_collapse_mask(iy, N, B)
 }
 
 /* `#ifndef OVERRIDE_renormalise_vector` — x86 does not override it. */

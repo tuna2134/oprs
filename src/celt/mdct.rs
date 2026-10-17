@@ -47,6 +47,7 @@
 //! that C computes twice) is read before it is written.
 
 use crate::celt::arch::*;
+use crate::celt::celt::MAX_CELT_FRAME;
 use crate::celt::kiss_fft::*;
 use crate::celt::mathops::PI;
 
@@ -144,8 +145,28 @@ pub fn clt_mdct_forward_c(
     let N4 = N >> 2;
     let trig = &l.trig[trig_off as usize..];
 
-    let mut f = vec![0.0f32; N2 as usize];
-    let mut f2 = vec![kiss_fft_cpx::default(); N4 as usize];
+    /* `VARDECL(kiss_fft_scalar, f); VARDECL(kiss_fft_cpx, f2);`
+       `ALLOC(f, N2, ...); ALLOC(f2, N4, ...)` — `l.n` is
+       `2*shortMdctSize*nbShortMdcts <= 2*MAX_CELT_FRAME`, so `N2 <=
+       MAX_CELT_FRAME` and `N4 <= MAX_CELT_FRAME/2`: stack storage.  The
+       `mdct` probe drives this directly with `l.n` up to 7680 (`N2` 3840),
+       which no mode can reach; only those cases fall back to the heap. */
+    let mut f_heap: Vec<f32> = Vec::new();
+    let mut f_storage = [0.0f32; MAX_CELT_FRAME];
+    let mut f: &mut [f32] = if N2 as usize <= MAX_CELT_FRAME {
+        &mut f_storage[..N2 as usize]
+    } else {
+        f_heap.resize(N2 as usize, 0.0);
+        f_heap.as_mut_slice()
+    };
+    let mut f2_heap: Vec<kiss_fft_cpx> = Vec::new();
+    let mut f2_storage = [kiss_fft_cpx::default(); MAX_CELT_FRAME / 2];
+    let mut f2: &mut [kiss_fft_cpx] = if N4 as usize <= MAX_CELT_FRAME / 2 {
+        &mut f2_storage[..N4 as usize]
+    } else {
+        f2_heap.resize(N4 as usize, kiss_fft_cpx::default());
+        f2_heap.as_mut_slice()
+    };
 
     /* Consider the input to be composed of four blocks: [a, b, c, d] */
     /* Window, shuffle, fold */
@@ -291,7 +312,16 @@ pub fn clt_mdct_backward_c(
     let post_shift: i32 = 0;
     /* `ARG_FIXED(fft_shift)` in the opus_fft_impl() call below is empty here. */
 
-    let mut f2 = vec![kiss_fft_cpx::default(); N4 as usize];
+    /* `VARDECL(kiss_fft_cpx, f2); ALLOC(f2, N4, kiss_fft_cpx);` — stack of the
+       C bound, with the `mdct` probe's out-of-domain `N4` on the heap. */
+    let mut f2_heap: Vec<kiss_fft_cpx> = Vec::new();
+    let mut f2_storage = [kiss_fft_cpx::default(); MAX_CELT_FRAME / 2];
+    let mut f2: &mut [kiss_fft_cpx] = if N4 as usize <= MAX_CELT_FRAME / 2 {
+        &mut f2_storage[..N4 as usize]
+    } else {
+        f2_heap.resize(N4 as usize, kiss_fft_cpx::default());
+        f2_heap.as_mut_slice()
+    };
 
     /* Pre-rotate */
     {

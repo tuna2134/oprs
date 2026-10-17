@@ -47,10 +47,18 @@ pub const OPUS_REPACKETIZER_SIZE: i32 = 1120;
 pub struct OpusRepacketizer {
     pub toc: u8,
     pub nb_frames: i32,
-    pub frames: [Vec<u8>; 48],
+    /// Frame `i`'s own bytes.  The C stores `const unsigned char *frames[48]`
+    /// borrowed from the caller's packet; the port owns the bytes, so an
+    /// `Option<Box<[u8]>>` slot (16 B, `None` is the null niche) replaces a
+    /// 24-byte `Vec`: `Repacketizer::new()` builds this struct for every
+    /// instance, and the 96 slots are 768 B smaller this way.  `None` means "no
+    /// frame stored here", which is what an empty `Vec` already meant to every
+    /// reader.
+    pub frames: [Option<Box<[u8]>>; 48],
     pub len: [opus_int16; 48],
     pub framesize: i32,
-    pub paddings: [Vec<u8>; 48],
+    /// The same, for the per-frame extension/padding payloads.
+    pub paddings: [Option<Box<[u8]>>; 48],
     pub padding_len: [opus_int32; 48],
     pub padding_nb_frames: [u8; 48],
 }
@@ -60,10 +68,16 @@ impl Default for OpusRepacketizer {
         OpusRepacketizer {
             toc: 0,
             nb_frames: 0,
-            frames: std::array::from_fn(|_| Vec::new()),
+            /* `[const { Vec::new() }; 48]` rather than `array::from_fn`:
+               identical values, but the const-repeat form is a single
+               48-element literal initialiser instead of 48 closure calls, and
+               `new()` is paid once per repacketizer workload iteration. */
+            /* `[const { None }; 48]`: `None` is a null pointer, so this is a
+               single zeroed literal rather than 48 closure calls. */
+            frames: [const { None }; 48],
             len: [0; 48],
             framesize: 0,
-            paddings: std::array::from_fn(|_| Vec::new()),
+            paddings: [const { None }; 48],
             padding_len: [0; 48],
             padding_nb_frames: [0; 48],
         }
@@ -142,11 +156,11 @@ impl OpusRepacketizer {
         let base = self.nb_frames as usize;
         let mut i = 0usize;
         while i < parsed.count as usize {
-            self.frames[base + i] = parsed.frames[i].to_vec();
+            self.frames[base + i] = Some(parsed.frames[i].to_vec().into_boxed_slice());
             self.len[base + i] = parsed.size[i];
             i += 1;
         }
-        self.paddings[base] = parsed.padding.to_vec();
+        self.paddings[base] = Some(parsed.padding.to_vec().into_boxed_slice());
         self.padding_len[base] = parsed.padding.len() as opus_int32;
         self.padding_nb_frames[base] = parsed.count as u8;
 
@@ -157,7 +171,7 @@ impl OpusRepacketizer {
             let n = self.nb_frames as usize;
             self.padding_len[n] = 0;
             self.padding_nb_frames[n] = 0;
-            self.paddings[n] = Vec::new();
+            self.paddings[n] = None;
             cnf -= 1;
         }
         self.nb_frames += 1;
@@ -208,7 +222,7 @@ impl OpusRepacketizer {
         let mut total_ext_count = extensions.len() as i32;
         for i in begin..end {
             let n = opus_packet_extensions_count(
-                &self.paddings[i as usize],
+                self.paddings[i as usize].as_deref().unwrap_or(&[]),
                 self.padding_len[i as usize],
                 self.padding_nb_frames[i as usize] as i32,
             );
@@ -229,7 +243,7 @@ impl OpusRepacketizer {
         for i in begin..end {
             let mut frame_ext_count = total_ext_count - ext_count;
             let ret = opus_packet_extensions_parse(
-                &self.paddings[i as usize],
+                self.paddings[i as usize].as_deref().unwrap_or(&[]),
                 self.padding_len[i as usize],
                 &mut all_extensions[ext_count as usize..],
                 &mut frame_ext_count,
@@ -394,7 +408,7 @@ impl OpusRepacketizer {
                in-place padding from opus_packet_pad or opus_packet_unpad.  The
                port owns its frames, so a plain copy is enough. */
             let n = self.len[(begin + i) as usize] as usize;
-            let fr = &self.frames[(begin + i) as usize];
+            let fr: &[u8] = self.frames[(begin + i) as usize].as_deref().unwrap_or(&[]);
             if fr.len() < n || pos + n > data.len() {
                 return OPUS_INTERNAL_ERROR;
             }
@@ -503,7 +517,7 @@ pub fn opus_packet_unpad(data: &mut [u8], len: opus_int32) -> opus_int32 {
     let mut i = 0;
     while i < rp.nb_frames {
         rp.padding_len[i as usize] = 0;
-        rp.paddings[i as usize] = Vec::new();
+        rp.paddings[i as usize] = None;
         i += 1;
     }
     let nb = rp.nb_frames;
@@ -603,7 +617,7 @@ pub fn opus_multistream_packet_unpad(
         let mut i = 0;
         while i < rp.nb_frames {
             rp.padding_len[i as usize] = 0;
-            rp.paddings[i as usize] = Vec::new();
+            rp.paddings[i as usize] = None;
             i += 1;
         }
         let nb = rp.nb_frames;

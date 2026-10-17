@@ -1532,10 +1532,53 @@ pub unsafe fn special_hybrid_folding(
     }
 }
 
+/// The scalar half of `ec_save = *ec;` — every `ec_ctx` field except the buffer
+/// contents.
+///
+/// In C `*ec = ec_save` copies the struct, whose `buf` is a *pointer*: the C
+/// snapshot therefore captures no bytes at all, and the bytes written during the
+/// trial encodings are rolled back separately through `bytes_save`.  The port's
+/// `ec_ctx` owns its buffer, so snapshotting it with `Clone` would allocate and
+/// copy up to 1275 bytes per trial for something nothing ever reads; carrying
+/// only the scalars keeps the θ RDO rollback allocation-free while restoring
+/// exactly the same state.
+#[derive(Clone, Copy)]
+struct EcScalars {
+    storage: opus_uint32,
+    end_offs: opus_uint32,
+    end_window: u32,
+    nend_bits: i32,
+    nbits_total: i32,
+    offs: opus_uint32,
+    rng: opus_uint32,
+    val: opus_uint32,
+    ext: opus_uint32,
+    rem: i32,
+    error: i32,
+}
+
+/// `ec_save = *ec;` without the (never read) buffer.
+#[inline]
+fn ec_snapshot(src: &ec_ctx) -> EcScalars {
+    EcScalars {
+        storage: src.storage,
+        end_offs: src.end_offs,
+        end_window: src.end_window,
+        nend_bits: src.nend_bits,
+        nbits_total: src.nbits_total,
+        offs: src.offs,
+        rng: src.rng,
+        val: src.val,
+        ext: src.ext,
+        rem: src.rem,
+        error: src.error,
+    }
+}
+
 /// Restore every `ec_ctx` field except the buffer contents (`*ec = ec_save` in C
 /// copies the pointer, not the bytes; `bytes_save` handles the bytes).
 #[inline]
-fn ec_restore_scalars(dst: &mut ec_ctx, src: &ec_ctx) {
+fn ec_restore_scalars(dst: &mut ec_ctx, src: &EcScalars) {
     dst.storage = src.storage;
     dst.end_offs = src.end_offs;
     dst.end_window = src.end_window;
@@ -1887,8 +1930,8 @@ pub fn quant_all_bands(
                 let cm2: u32;
                 let dist0: opus_val32;
                 let dist1: opus_val32;
-                let ec_save: ec_ctx;
-                let ec_save2: ec_ctx;
+                let ec_save: EcScalars;
+                let ec_save2: EcScalars;
                 let ctx_save: band_ctx;
                 let ctx_save2: band_ctx;
                 let nstart_bytes: usize;
@@ -1901,7 +1944,7 @@ pub fn quant_all_bands(
                 );
                 /* Make a copy. */
                 cm0 = x_cm | y_cm;
-                ec_save = unsafe { (*ecp).clone() };
+                ec_save = ec_snapshot(unsafe { &*ecp });
                 ctx_save = ctx;
                 unsafe {
                     core::ptr::copy_nonoverlapping(X, x_save, N as usize);
@@ -1932,7 +1975,7 @@ pub fn quant_all_bands(
 
                 /* Save first result. */
                 cm2 = x_cm;
-                ec_save2 = unsafe { (*ecp).clone() };
+                ec_save2 = ec_snapshot(unsafe { &*ecp });
                 ctx_save2 = ctx;
                 unsafe {
                     core::ptr::copy_nonoverlapping(X, x_save2, N as usize);
