@@ -57,7 +57,7 @@ use super::arch::*;
 use super::bands::{anti_collapse, denormalise_bands, quant_all_bands, SPREAD_NORMAL};
 use super::celt::{
     comb_filter, comb_filter_in_place, fromOpus, init_caps, resampling_factor, spread_icdf,
-    tapset_icdf, tf_select_table, trim_icdf, COMBFILTER_MINPERIOD,
+    tapset_icdf, tf_select_table, trim_icdf, COMBFILTER_MINPERIOD, MAX_NB_EBANDS,
 };
 use super::celt_lpc::{_celt_autocorr, _celt_lpc, celt_fir, celt_iir, CELT_LPC_ORDER};
 use super::entcode::*;
@@ -71,6 +71,7 @@ use super::rate::clt_compute_allocation;
 use super::vq::renormalise_vector;
 use crate::ffi;
 use crate::types::*;
+use core::mem::MaybeUninit;
 
 /// `OPUS_ARCHMASK` is 7, but `opus_select_arch()` returns 4 on the host the
 /// reference configuration is pinned to (`docs/porting-conventions.md`); the
@@ -243,6 +244,13 @@ pub struct CELTDecoder {
     pub backgroundLogE: Vec<celt_glog>,
     /// `opus_val16 lpc[]`, `channels*CELT_LPC_ORDER`
     pub lpc: Vec<opus_val16>,
+
+    /// Reusable `celt_sig` scratch standing in for the C's `VARDECL`/`ALLOC`
+    /// temporaries (`deemphasis()`'s `scratch`, `celt_synthesis()`'s `freq`
+    /// and its `freq2` copy).  Not part of `struct OpusCustomDecoder`: the C
+    /// allocates these on the stack per call, this port grows one buffer once
+    /// so the per-frame decode path performs no heap allocation.
+    pub scratch: Vec<celt_sig>,
 }
 
 impl Default for CELTDecoder {
@@ -283,6 +291,7 @@ impl Default for CELTDecoder {
             oldLogE2: Vec::new(),
             backgroundLogE: Vec::new(),
             lpc: Vec::new(),
+            scratch: Vec::new(),
         }
     }
 }
@@ -540,6 +549,12 @@ fn decoder_reset_state(st: &mut CELTDecoder) {
 /// `inp[c]` is the C `in[c]` pointer (already offset to `out_syn`); `pcm` is
 /// interleaved `[N*C]`.  The `deemphasis_stereo_simple()` shortcut is *not*
 /// compiled in this configuration (it is guarded by `!CUSTOM_MODES`).
+///
+/// `scratch` replaces the C's `VARDECL(celt_sig, scratch)` + `ALLOC`: stack,
+/// uninitialised, `N` samples.  It is a reusable buffer owned by the decoder
+/// (grown once) instead of a per-frame `vec![0; N]`.  Every element that is
+/// read (`scratch[j]`, `scratch[j*downsample]` for `j < Nd`) is written by the
+/// loop that sets `apply_downsampling` first.
 pub fn deemphasis(
     inp: &[&[celt_sig]],
     pcm: &mut [opus_res],
@@ -549,8 +564,12 @@ pub fn deemphasis(
     coef: &[opus_val16],
     mem: &mut [celt_sig],
     accum: i32,
+    scratch: &mut Vec<celt_sig>,
 ) {
-    let mut scratch = vec![0 as celt_sig; N as usize];
+    if scratch.len() < N as usize {
+        scratch.resize(N as usize, 0.);
+    }
+    let scratch = &mut scratch[..N as usize];
     let coef0 = coef[0];
     let Nd = N / downsample;
     let mut c = 0;
@@ -624,6 +643,11 @@ pub fn deemphasis(
 /// aliasing trick (using the output buffer as `freq2`) is replaced by an owned
 /// copy, which is observationally identical because the aliased region is only
 /// read *before* the MDCT writes that would clobber it.
+///
+/// `scratch` replaces the C's `VARDECL(celt_sig, freq)` + `ALLOC` and the owned
+/// `freq2` copy: a reusable buffer owned by the decoder (grown once) holding
+/// `2*N` samples instead of two per-frame `vec![0; N]`.  `denormalise_bands()`
+/// writes all `N` samples of each half before either is read.
 pub fn celt_synthesis(
     mode: &CELTMode,
     X: &mut [celt_norm],
@@ -639,11 +663,15 @@ pub fn celt_synthesis(
     downsample: i32,
     silence: i32,
     arch: i32,
+    scratch: &mut Vec<celt_sig>,
 ) {
     let overlap = mode.overlap;
     let nbEBands = mode.nbEBands;
     let N = mode.shortMdctSize << LM;
-    let mut freq = vec![0 as celt_sig; N as usize]; /* Interleaved signal MDCTs */
+    if scratch.len() < 2 * N as usize {
+        scratch.resize(2 * N as usize, 0.);
+    }
+    let scratch = &mut scratch[..2 * N as usize];
     let M = 1 << LM;
 
     let B: i32;
@@ -663,11 +691,11 @@ pub fn celt_synthesis(
         /* Copying a mono stream to two channels.  The C stores a temporary
            copy in `out_syn[1]+overlap/2` because the IMDCT destroys its
            input; an owned buffer is equivalent (see the doc comment). */
+        let (freq, freq2) = scratch.split_at_mut(N as usize);
         denormalise_bands(
-            mode, X, &mut freq, oldBandE, start, effEnd, M, downsample, silence,
+            mode, X, freq, oldBandE, start, effEnd, M, downsample, silence,
         );
-        let mut freq2 = vec![0 as celt_sig; N as usize];
-        freq2.copy_from_slice(&freq);
+        freq2.copy_from_slice(freq);
         for b in 0..B {
             let off = (out_off[0] + NB * b) as usize;
             clt_mdct_backward(
@@ -696,14 +724,14 @@ pub fn celt_synthesis(
         }
     } else if CC == 1 && C == 2 {
         /* Downmixing a stereo stream to mono. */
+        let (freq, freq2) = scratch.split_at_mut(N as usize);
         denormalise_bands(
-            mode, X, &mut freq, oldBandE, start, effEnd, M, downsample, silence,
+            mode, X, freq, oldBandE, start, effEnd, M, downsample, silence,
         );
-        let mut freq2 = vec![0 as celt_sig; N as usize];
         denormalise_bands(
             mode,
             &X[N as usize..],
-            &mut freq2,
+            freq2,
             &oldBandE[nbEBands as usize..],
             start,
             effEnd,
@@ -729,12 +757,13 @@ pub fn celt_synthesis(
         }
     } else {
         /* Normal case (mono or stereo). */
+        let freq = &mut scratch[..N as usize];
         let mut c = 0;
         loop {
             denormalise_bands(
                 mode,
                 &X[(c * N) as usize..],
-                &mut freq,
+                freq,
                 &oldBandE[(c * nbEBands) as usize..],
                 start,
                 effEnd,
@@ -825,7 +854,20 @@ fn tf_decode(
 
 /// `celt_plc_pitch_search()` (`celt_decoder.c:552`).
 fn celt_plc_pitch_search(st: &CELTDecoder, C: i32, arch: i32) -> i32 {
-    let mut lp_pitch_buf = vec![0 as opus_val16; (DECODE_BUFFER_SIZE >> 1) as usize];
+    /* `VARDECL(opus_val16, lp_pitch_buf)` + `ALLOC(lp_pitch_buf,
+       DECODE_BUFFER_SIZE>>1, ...)`: uninitialised stack storage, every sample
+       written by `pitch_downsample()`. */
+    const LP_PITCH_LEN: usize = (DECODE_BUFFER_SIZE >> 1) as usize;
+    let mut lp_pitch_buf_storage = [MaybeUninit::<opus_val16>::uninit(); LP_PITCH_LEN];
+    /* SAFETY: `opus_val16` is `f32`, so every bit pattern is a valid value, and
+       `pitch_downsample()` writes all `LP_PITCH_LEN` samples before the buffer
+       is read. */
+    let lp_pitch_buf: &mut [opus_val16] = unsafe {
+        core::slice::from_raw_parts_mut(
+            lp_pitch_buf_storage.as_mut_ptr() as *mut opus_val16,
+            LP_PITCH_LEN,
+        )
+    };
     let p0 = st.plane(0) as usize;
     let p1 = if C == 2 { st.plane(1) as usize } else { p0 };
     let buf0 = &st.decode_mem[p0..p0 + DECODE_BUFFER_SIZE as usize];
@@ -833,7 +875,7 @@ fn celt_plc_pitch_search(st: &CELTDecoder, C: i32, arch: i32) -> i32 {
     let planes: [&[celt_sig]; 2] = [buf0, buf1];
     pitch_downsample(
         &planes[..C as usize],
-        &mut lp_pitch_buf,
+        lp_pitch_buf,
         DECODE_BUFFER_SIZE >> 1,
         C,
         2,
@@ -842,7 +884,7 @@ fn celt_plc_pitch_search(st: &CELTDecoder, C: i32, arch: i32) -> i32 {
     let mut pitch_index = 0;
     pitch_search(
         &lp_pitch_buf[(PLC_PITCH_LAG_MAX >> 1) as usize..],
-        &lp_pitch_buf,
+        lp_pitch_buf,
         DECODE_BUFFER_SIZE - PLC_PITCH_LAG_MAX,
         PLC_PITCH_LAG_MAX - PLC_PITCH_LAG_MIN,
         &mut pitch_index,
@@ -1067,6 +1109,7 @@ fn celt_decode_lost(
             st.downsample,
             0,
             st.arch,
+            &mut st.scratch,
         );
 
         /* Run the postfilter with the last parameters. */
@@ -1469,7 +1512,6 @@ pub fn celt_decode_with_ec_dred(
     let mode_effEBands = st.mode.effEBands;
     let nbEBands: i32 = st.mode.nbEBands;
     let overlap: i32 = st.mode.overlap;
-    let eBands: Vec<opus_int16> = st.mode.eBands.clone();
     let start: i32 = st.start;
     let mut end: i32 = st.end;
     let mut frame_size: i32 = frame_size_in * st.downsample;
@@ -1577,6 +1619,7 @@ pub fn celt_decode_with_ec_dred(
             &st.mode.preemph,
             &mut st.preemph_memD,
             accum,
+            &mut st.scratch,
         );
         return frame_size / st.downsample;
     }
@@ -1703,8 +1746,14 @@ pub fn celt_decode_with_ec_dred(
     /* Get band energies */
     unquant_coarse_energy(&st.mode, start, end, &mut st.oldEBands, intra_ener, dec, C, LM);
 
-    let mut tf_res = vec![0; nbEBands as usize];
-    tf_decode(start, end, isTransient, &mut tf_res, LM, dec);
+    /* `VARDECL(int, tf_res); ALLOC(tf_res, nbEBands, int);` and the five
+       sibling per-band arrays of the same C ALLOC block: stack storage, not a
+       per-frame `vec![0; nbEBands]`.  `nbEBands <= MAX_NB_EBANDS` always
+       (`validate_celt_decoder()` asserts `end <= 25`). */
+    debug_assert!(nbEBands as usize <= MAX_NB_EBANDS);
+    let mut tf_res_storage = [0i32; MAX_NB_EBANDS];
+    let tf_res = &mut tf_res_storage[..nbEBands as usize];
+    tf_decode(start, end, isTransient, tf_res, LM, dec);
 
     tell = dec.ec_tell();
     let mut spread_decision = SPREAD_NORMAL;
@@ -1712,10 +1761,17 @@ pub fn celt_decode_with_ec_dred(
         spread_decision = ec_dec_icdf(dec, &spread_icdf, 5);
     }
 
-    let mut cap = vec![0; nbEBands as usize];
-    init_caps(&st.mode, &mut cap, LM, C);
+    let mut cap_storage = [0i32; MAX_NB_EBANDS];
+    let cap = &mut cap_storage[..nbEBands as usize];
+    init_caps(&st.mode, cap, LM, C);
 
-    let mut offsets = vec![0; nbEBands as usize];
+    let mut offsets_storage = [0i32; MAX_NB_EBANDS];
+    let offsets = &mut offsets_storage[..nbEBands as usize];
+
+    /* `const opus_int16 *eBands = mode->eBands;` — the port previously cloned
+       the table into a `Vec` on every frame; `st.mode` is not mutated here, so
+       the borrow is used directly. */
+    let eBands = &st.mode.eBands;
 
     let mut dynalloc_logp = 6;
     total_bits <<= BITRES;
@@ -1750,7 +1806,8 @@ pub fn celt_decode_with_ec_dred(
         }
     }
 
-    let mut fine_quant = vec![0; nbEBands as usize];
+    let mut fine_quant_storage = [0i32; MAX_NB_EBANDS];
+    let fine_quant = &mut fine_quant_storage[..nbEBands as usize];
     let alloc_trim = if tell.wrapping_add(6 << BITRES) <= total_bits {
         ec_dec_icdf(dec, &trim_icdf, 7)
     } else {
@@ -1765,8 +1822,10 @@ pub fn celt_decode_with_ec_dred(
     };
     bits -= anti_collapse_rsv;
 
-    let mut pulses = vec![0; nbEBands as usize];
-    let mut fine_priority = vec![0; nbEBands as usize];
+    let mut pulses_storage = [0i32; MAX_NB_EBANDS];
+    let pulses = &mut pulses_storage[..nbEBands as usize];
+    let mut fine_priority_storage = [0i32; MAX_NB_EBANDS];
+    let fine_priority = &mut fine_priority_storage[..nbEBands as usize];
     let mut intensity: i32 = 0;
     let mut dual_stereo: i32 = 0;
     let mut balance: opus_int32 = 0;
@@ -1775,16 +1834,16 @@ pub fn celt_decode_with_ec_dred(
         &st.mode,
         start,
         end,
-        &offsets,
-        &cap,
+        offsets,
+        cap,
         alloc_trim,
         &mut intensity,
         &mut dual_stereo,
         bits,
         &mut balance,
-        &mut pulses,
-        &mut fine_quant,
-        &mut fine_priority,
+        pulses,
+        fine_quant,
+        fine_priority,
         C,
         LM,
         dec,
@@ -1799,7 +1858,7 @@ pub fn celt_decode_with_ec_dred(
         end,
         &mut st.oldEBands,
         None,
-        &fine_quant,
+        fine_quant,
         dec,
         C,
     );
@@ -1835,12 +1894,12 @@ pub fn celt_decode_with_ec_dred(
             y,
             &mut collapse_masks,
             &[],
-            &pulses,
+            pulses,
             shortBlocks,
             spread_decision,
             dual_stereo,
             intensity,
-            &tf_res,
+            tf_res,
             len * (8 << BITRES) - anti_collapse_rsv,
             balance,
             dec,
@@ -1863,8 +1922,8 @@ pub fn celt_decode_with_ec_dred(
         start,
         end,
         Some(&mut st.oldEBands),
-        &fine_quant,
-        &fine_priority,
+        fine_quant,
+        fine_priority,
         len * 8 - dec.ec_tell(),
         dec,
         C,
@@ -1882,7 +1941,7 @@ pub fn celt_decode_with_ec_dred(
             &st.oldEBands,
             &st.oldLogE,
             &st.oldLogE2,
-            &pulses,
+            pulses,
             st.rng,
             0,
             st.arch,
@@ -1913,6 +1972,7 @@ pub fn celt_decode_with_ec_dred(
         st.downsample,
         silence,
         st.arch,
+        &mut st.scratch,
     );
 
     {
@@ -2034,6 +2094,7 @@ pub fn celt_decode_with_ec_dred(
             &st.mode.preemph,
             &mut st.preemph_memD,
             accum,
+            &mut st.scratch,
         );
     }
     st.loss_duration = 0;
@@ -2303,6 +2364,7 @@ mod tests {
             1,
             1,
             ARCH,
+            &mut st.scratch,
         );
         /* With silence=1 `denormalise_bands` zeroes the spectrum, so the
            whole IMDCT output is zero. */

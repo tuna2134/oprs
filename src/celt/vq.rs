@@ -122,12 +122,25 @@ fn celt_inner_prod_norm_shift(
 fn exp_rotation1(X: &mut [celt_norm], len: i32, stride: i32, c: opus_val16, s: opus_val16) {
     let ms = NEG16(s);
     norm_scaledown(X, len, NORM_SHIFT - 14);
+    /* `len <= X.len()` is the caller's contract (`exp_rotation()` hands each
+       call a `stride`-th of the band), and both loops keep their indices
+       below it: the first has `i < len - stride` (so `i + stride < len`), the
+       second starts at `len - 2*stride - 1` and only decreases (`i + stride <=
+       len - stride - 1 + stride`).  Hoisting that lets the four accesses per
+       iteration drop their bounds checks, which the C does not pay either. */
+    debug_assert!(len >= 0 && stride >= 0 && len as usize <= X.len());
+    let xp = X.as_mut_ptr();
     let mut i = 0;
     while i < len - stride {
-        let x1 = X[i as usize];
-        let x2 = X[(i + stride) as usize];
-        X[(i + stride) as usize] = EXTRACT16(PSHR32(MAC16_16(MULT16_16(c, x2), s, x1), 15));
-        X[i as usize] = EXTRACT16(PSHR32(MAC16_16(MULT16_16(c, x1), ms, x2), 15));
+        let ii = i as usize;
+        let st = stride as usize;
+        /* SAFETY: see above — `ii + st < len <= X.len()`. */
+        unsafe {
+            let x1 = *xp.add(ii);
+            let x2 = *xp.add(ii + st);
+            *xp.add(ii + st) = EXTRACT16(PSHR32(MAC16_16(MULT16_16(c, x2), s, x1), 15));
+            *xp.add(ii) = EXTRACT16(PSHR32(MAC16_16(MULT16_16(c, x1), ms, x2), 15));
+        }
         i += 1;
     }
     /* `Xptr = &X[len-2*stride-1];` — that pointer is only formed, never
@@ -135,10 +148,16 @@ fn exp_rotation1(X: &mut [celt_norm], len: i32, stride: i32, c: opus_val16, s: o
        there (the C would be undefined, not observably different). */
     let mut i = len - 2 * stride - 1;
     while i >= 0 {
-        let x1 = X[i as usize];
-        let x2 = X[(i + stride) as usize];
-        X[(i + stride) as usize] = EXTRACT16(PSHR32(MAC16_16(MULT16_16(c, x2), s, x1), 15));
-        X[i as usize] = EXTRACT16(PSHR32(MAC16_16(MULT16_16(c, x1), ms, x2), 15));
+        let ii = i as usize;
+        let st = stride as usize;
+        /* SAFETY: `ii >= 0` (loop condition) and `ii + st <= len - stride - 1 +
+           stride < len <= X.len()`. */
+        unsafe {
+            let x1 = *xp.add(ii);
+            let x2 = *xp.add(ii + st);
+            *xp.add(ii + st) = EXTRACT16(PSHR32(MAC16_16(MULT16_16(c, x2), s, x1), 15));
+            *xp.add(ii) = EXTRACT16(PSHR32(MAC16_16(MULT16_16(c, x1), ms, x2), 15));
+        }
         i -= 1;
     }
     norm_scaleup(X, len, NORM_SHIFT - 14);

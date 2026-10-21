@@ -86,21 +86,28 @@ use crate::celt::mathops::celt_rcp;
 // `[i32; 4]` models `__m128i`.  The element-wise operations below perform
 // exactly one IEEE-754 binary32 operation per lane, in the same order as the
 // corresponding SSE/AVX intrinsics, so the results are bit-identical.
+//
+// On x86_64 the SSE/SSE2 kernels are transcribed with real intrinsics, so these
+// helpers only back the portable `#[cfg(not(target_arch = "x86_64"))]`
+// emulations and are allowed to be unused there.
 // ---------------------------------------------------------------------------
 
 /// `_mm_add_ps`
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn v4_add(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]]
 }
 
 /// `_mm_mul_ps`
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn v4_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     [a[0] * b[0], a[1] * b[1], a[2] * b[2], a[3] * b[3]]
 }
 
 /// `_mm_andnot_ps(_mm_set_ps1(-0.f), v)`: clears the sign bit of every lane.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn v4_abs(v: [f32; 4]) -> [f32; 4] {
     [
@@ -112,12 +119,14 @@ fn v4_abs(v: [f32; 4]) -> [f32; 4] {
 }
 
 /// `_mm_loadu_ps(s + i)`
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn v4_load(s: &[f32], i: usize) -> [f32; 4] {
     [s[i], s[i + 1], s[i + 2], s[i + 3]]
 }
 
 /// `_mm_storeu_ps(d + i, v)`
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn v4_store(d: &mut [f32], i: usize, v: [f32; 4]) {
     d[i] = v[0];
@@ -128,6 +137,7 @@ fn v4_store(d: &mut [f32], i: usize, v: [f32; 4]) {
 
 /// `_mm_shuffle_ps(a, b, imm)`: `dst0=a[imm[1:0]]`, `dst1=a[imm[3:2]]`,
 /// `dst2=b[imm[5:4]]`, `dst3=b[imm[7:6]]`.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn shuffle_ps(a: [f32; 4], b: [f32; 4], imm: u32) -> [f32; 4] {
     [
@@ -139,6 +149,7 @@ fn shuffle_ps(a: [f32; 4], b: [f32; 4], imm: u32) -> [f32; 4] {
 }
 
 /// `_mm_shuffle_epi32(a, imm)`
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn shuffle_epi32(a: [i32; 4], imm: u32) -> [i32; 4] {
     [
@@ -150,6 +161,7 @@ fn shuffle_epi32(a: [i32; 4], imm: u32) -> [i32; 4] {
 }
 
 /// `_mm_add_epi32` (wrapping, like the C `int` add)
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn v4_add_epi32(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     [
@@ -160,6 +172,7 @@ fn v4_add_epi32(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     ]
 }
 
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn i16_lanes(v: i32) -> [i16; 2] {
     let b = v.to_le_bytes();
@@ -169,6 +182,7 @@ fn i16_lanes(v: i32) -> [i16; 2] {
     ]
 }
 
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn from_i16_lanes(l: [i16; 2]) -> i32 {
     let a = l[0].to_le_bytes();
@@ -178,6 +192,7 @@ fn from_i16_lanes(l: [i16; 2]) -> i32 {
 
 /// `_mm_max_epi16` (signed 16-bit lane-wise maximum; the packed-16-bit
 /// "trick" in `op_pvq_search_sse2` relies on this exact operation).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn max_epi16(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
     let mut o = [0i32; 4];
@@ -196,6 +211,7 @@ fn max_epi16(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
 
 /// `_mm_max_ps(a, b)` = `a > b ? a : b` (so a NaN in either operand yields the
 /// second operand).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn max_ps(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
     [
@@ -207,6 +223,7 @@ fn max_ps(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 }
 
 /// `_mm_cmpgt_ps(a, b)` as a 32-bit lane mask
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn cmpgt_ps_mask(a: [f32; 4], b: [f32; 4]) -> [i32; 4] {
     let m = |x: f32, y: f32| if x > y { -1i32 } else { 0i32 };
@@ -214,6 +231,7 @@ fn cmpgt_ps_mask(a: [f32; 4], b: [f32; 4]) -> [i32; 4] {
 }
 
 /// `_mm_cmplt_ps(a, b)` as a 32-bit lane mask
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn cmplt_ps_mask(a: [f32; 4], b: [f32; 4]) -> [i32; 4] {
     let m = |x: f32, y: f32| if x < y { -1i32 } else { 0i32 };
@@ -221,6 +239,7 @@ fn cmplt_ps_mask(a: [f32; 4], b: [f32; 4]) -> [i32; 4] {
 }
 
 /// `_mm_cmpeq_ps(a, b)` as a 32-bit lane mask
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn cmpeq_ps_mask(a: [f32; 4], b: [f32; 4]) -> [i32; 4] {
     let m = |x: f32, y: f32| if x == y { -1i32 } else { 0i32 };
@@ -229,6 +248,7 @@ fn cmpeq_ps_mask(a: [f32; 4], b: [f32; 4]) -> [i32; 4] {
 
 /// `_mm_cvttps_epi32`: truncate toward zero; out-of-range or NaN produce the
 /// integer indefinite `0x80000000` (Rust's `as` would saturate instead).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn cvttps_epi32(a: [f32; 4]) -> [i32; 4] {
     let f = |x: f32| -> i32 {
@@ -242,12 +262,14 @@ fn cvttps_epi32(a: [f32; 4]) -> [i32; 4] {
 }
 
 /// `_mm_cvtepi32_ps`
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn cvtepi32_ps(a: [i32; 4]) -> [f32; 4] {
     [a[0] as f32, a[1] as f32, a[2] as f32, a[3] as f32]
 }
 
 /// `_mm_set1_ps`
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn splat4(x: f32) -> [f32; 4] {
     [x; 4]
@@ -821,24 +843,70 @@ pub fn simd_rsqrt_ps(x: f32) -> f32 {
     f32::from_bits(((re as u32) << 23) | ((RSQRT_TAB[idx] as u32) << 11))
 }
 
+/// [`simd_rcp_ps`] over four lanes.
+///
+/// On x86_64 the hardware `_mm_rcp_ps` is used directly.  [`simd_rcp_ps`] is an
+/// exact software model of that instruction (bit-for-bit over 8,000,000 tested
+/// inputs, including denormals, ±Inf, NaN and negatives), but the model costs
+/// ~15 scalar operations per lane where the C executes one instruction for all
+/// four; the PVQ search calls this once per band, so the difference is small
+/// here but the swap is free.  The portable model remains the fallback.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn simd_rcp_ps_v4(a: [f32; 4]) -> [f32; 4] {
-    [
-        simd_rcp_ps(a[0]),
-        simd_rcp_ps(a[1]),
-        simd_rcp_ps(a[2]),
-        simd_rcp_ps(a[3]),
-    ]
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::x86_64::*;
+        // SAFETY: SSE is part of the x86_64 baseline.  The load/store touch
+        // exactly the four elements of `a` / `o`.
+        let v = unsafe { _mm_rcp_ps(_mm_loadu_ps(a.as_ptr())) };
+        let mut o = [0.0f32; 4];
+        unsafe { _mm_storeu_ps(o.as_mut_ptr(), v) };
+        o
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        [
+            simd_rcp_ps(a[0]),
+            simd_rcp_ps(a[1]),
+            simd_rcp_ps(a[2]),
+            simd_rcp_ps(a[3]),
+        ]
+    }
 }
 
+/// [`simd_rsqrt_ps`] over four lanes.
+///
+/// On x86_64 the hardware `_mm_rsqrt_ps` is used directly.  [`simd_rsqrt_ps`] is
+/// an exact software model of that instruction (bit-for-bit over 8,000,000
+/// tested inputs, including denormals, ±Inf, NaN and negatives), but it costs
+/// ~15 scalar operations per lane (bit manipulation plus an `RSQRT_TAB`
+/// lookup).  `op_pvq_search_sse2` calls this once per 4 samples *per pulse*, so
+/// the model ran O(K·N) emulated square-root reciprocals where the C runs one
+/// `rsqrtps`; that is the dominant cost of the PVQ search.  The portable model
+/// remains the fallback.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline(always)]
 fn simd_rsqrt_ps_v4(a: [f32; 4]) -> [f32; 4] {
-    [
-        simd_rsqrt_ps(a[0]),
-        simd_rsqrt_ps(a[1]),
-        simd_rsqrt_ps(a[2]),
-        simd_rsqrt_ps(a[3]),
-    ]
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::x86_64::*;
+        // SAFETY: SSE is part of the x86_64 baseline.  The load/store touch
+        // exactly the four elements of `a` / `o`.
+        let v = unsafe { _mm_rsqrt_ps(_mm_loadu_ps(a.as_ptr())) };
+        let mut o = [0.0f32; 4];
+        unsafe { _mm_storeu_ps(o.as_mut_ptr(), v) };
+        o
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        [
+            simd_rsqrt_ps(a[0]),
+            simd_rsqrt_ps(a[1]),
+            simd_rsqrt_ps(a[2]),
+            simd_rsqrt_ps(a[3]),
+        ]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -866,35 +934,116 @@ pub fn xcorr_kernel(x: &[f32], y: &[f32], sum: &mut [f32; 4], len: i32) {
             "xcorr_kernel: y needs len+3 elements"
         );
     }
-    let mut xsum1 = *sum;
-    let mut xsum2 = [0.0f32; 4];
-    let mut j: i32 = 0;
-    while j < len - 3 {
-        let jj = j as usize;
-        let x0 = v4_load(x, jj);
-        let yj = v4_load(y, jj);
-        let y3 = v4_load(y, jj + 3);
-        xsum1 = v4_add(xsum1, v4_mul(splat4(x0[0]), yj));
-        xsum2 = v4_add(xsum2, v4_mul(splat4(x0[1]), shuffle_ps(yj, y3, 0x49)));
-        xsum1 = v4_add(xsum1, v4_mul(splat4(x0[2]), shuffle_ps(yj, y3, 0x9e)));
-        xsum2 = v4_add(xsum2, v4_mul(splat4(x0[3]), y3));
-        j += 4;
+    /* SSE is part of the x86-64 baseline (`OPUS_X86_PRESUME_SSE` in the
+       reference build), so the C body is transcribed instruction for
+       instruction: two accumulators, `_mm_shuffle_ps` lane selection, folded
+       once at the end.  The `[f32; 4]` emulation below stays as the fallback. */
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::x86_64::*;
+        /* SAFETY: SSE is the x86-64 baseline.  The debug asserts above give
+           `x.len() >= len`, `y.len() >= len + 3`; the loop's furthest load is
+           `y[j+3 .. j+7]` with `j <= len-4` (so `y[len-1 .. len+3]`) and the
+           tail's is `y[j .. j+4]` with `j <= len-1` (so `y[len-1 .. len+3]`).
+           The store writes exactly `sum[0..4]`. */
+        unsafe {
+            let mut xsum1 = _mm_loadu_ps(sum.as_ptr());
+            let mut xsum2 = _mm_setzero_ps();
+            let mut j: i32 = 0;
+            while j < len - 3 {
+                let jj = j as usize;
+                let x0 = _mm_loadu_ps(x.as_ptr().add(jj));
+                let yj = _mm_loadu_ps(y.as_ptr().add(jj));
+                let y3 = _mm_loadu_ps(y.as_ptr().add(jj + 3));
+                xsum1 = _mm_add_ps(
+                    xsum1,
+                    _mm_mul_ps(_mm_shuffle_ps(x0, x0, 0x00), yj),
+                );
+                xsum2 = _mm_add_ps(
+                    xsum2,
+                    _mm_mul_ps(
+                        _mm_shuffle_ps(x0, x0, 0x55),
+                        _mm_shuffle_ps(yj, y3, 0x49),
+                    ),
+                );
+                xsum1 = _mm_add_ps(
+                    xsum1,
+                    _mm_mul_ps(
+                        _mm_shuffle_ps(x0, x0, 0xaa),
+                        _mm_shuffle_ps(yj, y3, 0x9e),
+                    ),
+                );
+                xsum2 = _mm_add_ps(xsum2, _mm_mul_ps(_mm_shuffle_ps(x0, x0, 0xff), y3));
+                j += 4;
+            }
+            if j < len {
+                let mut jj = j as usize;
+                xsum1 = _mm_add_ps(
+                    xsum1,
+                    _mm_mul_ps(
+                        _mm_load1_ps(x.as_ptr().add(jj)),
+                        _mm_loadu_ps(y.as_ptr().add(jj)),
+                    ),
+                );
+                j += 1;
+                if j < len {
+                    jj = j as usize;
+                    xsum2 = _mm_add_ps(
+                        xsum2,
+                        _mm_mul_ps(
+                            _mm_load1_ps(x.as_ptr().add(jj)),
+                            _mm_loadu_ps(y.as_ptr().add(jj)),
+                        ),
+                    );
+                    j += 1;
+                    if j < len {
+                        jj = j as usize;
+                        xsum1 = _mm_add_ps(
+                            xsum1,
+                            _mm_mul_ps(
+                                _mm_load1_ps(x.as_ptr().add(jj)),
+                                _mm_loadu_ps(y.as_ptr().add(jj)),
+                            ),
+                        );
+                    }
+                }
+            }
+            _mm_storeu_ps(sum.as_mut_ptr(), _mm_add_ps(xsum1, xsum2));
+        }
+        return;
     }
-    if j < len {
-        let jj = j as usize;
-        xsum1 = v4_add(xsum1, v4_mul(splat4(x[jj]), v4_load(y, jj)));
-        j += 1;
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut xsum1 = *sum;
+        let mut xsum2 = [0.0f32; 4];
+        let mut j: i32 = 0;
+        while j < len - 3 {
+            let jj = j as usize;
+            let x0 = v4_load(x, jj);
+            let yj = v4_load(y, jj);
+            let y3 = v4_load(y, jj + 3);
+            xsum1 = v4_add(xsum1, v4_mul(splat4(x0[0]), yj));
+            xsum2 = v4_add(xsum2, v4_mul(splat4(x0[1]), shuffle_ps(yj, y3, 0x49)));
+            xsum1 = v4_add(xsum1, v4_mul(splat4(x0[2]), shuffle_ps(yj, y3, 0x9e)));
+            xsum2 = v4_add(xsum2, v4_mul(splat4(x0[3]), y3));
+            j += 4;
+        }
         if j < len {
             let jj = j as usize;
-            xsum2 = v4_add(xsum2, v4_mul(splat4(x[jj]), v4_load(y, jj)));
+            xsum1 = v4_add(xsum1, v4_mul(splat4(x[jj]), v4_load(y, jj)));
             j += 1;
             if j < len {
                 let jj = j as usize;
-                xsum1 = v4_add(xsum1, v4_mul(splat4(x[jj]), v4_load(y, jj)));
+                xsum2 = v4_add(xsum2, v4_mul(splat4(x[jj]), v4_load(y, jj)));
+                j += 1;
+                if j < len {
+                    let jj = j as usize;
+                    xsum1 = v4_add(xsum1, v4_mul(splat4(x[jj]), v4_load(y, jj)));
+                }
             }
         }
+        *sum = v4_add(xsum1, xsum2);
     }
-    *sum = v4_add(xsum1, xsum2);
 }
 
 /// `celt/pitch.h:65` `xcorr_kernel_c` — the plain-C reference (not reachable in
@@ -993,6 +1142,54 @@ pub fn xcorr_kernel_c(x: &[f32], y: &[f32], sum: &mut [f32; 4], len: i32) {
 // celt_inner_prod / dual_inner_prod
 // ---------------------------------------------------------------------------
 
+/// `celt/x86/pitch_sse.c:108` `celt_inner_prod_sse`, transcribed with
+/// `core::arch::x86_64` intrinsics.
+///
+/// The portable `[f32; 4]` lane emulation is arithmetically identical but
+/// LLVM will not vectorise it (the same problem documented for
+/// [`xcorr_kernel_avx_hw`]): every block becomes scalar `movss`/`mulss`/`addss`
+/// plus bounds comparisons, where the C runs one `movups`/`mulps`/`addps` per
+/// operand.  SSE/SSE2 are part of the x86-64 baseline, so no `#[target_feature]`
+/// is required.  Only lane 0 of the final `sum` is observed, exactly as in the
+/// C, and the tail keeps `MAC16_16` (mul then add, never fused).
+///
+/// `x.len() >= n >= 0` and `y.len() >= n` (no over-read).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn celt_inner_prod_sse_hw(x: &[f32], y: &[f32], n: i32) -> f32 {
+    use core::arch::x86_64::*;
+
+    // SAFETY: the vector loop runs while `i < n - 3` and loads
+    // `x[i..i+4]`/`y[i..i+4]`, which the caller guarantees to be in bounds
+    // (`x.len()`, `y.len() >= n`); the tail is scalar and `i < n` there.
+    unsafe {
+        let mut sum = _mm_setzero_ps();
+        let mut i: i32 = 0;
+        while i < n - 3 {
+            let ii = i as usize;
+            sum = _mm_add_ps(
+                sum,
+                _mm_mul_ps(
+                    _mm_loadu_ps(x.as_ptr().add(ii)),
+                    _mm_loadu_ps(y.as_ptr().add(ii)),
+                ),
+            );
+            i += 4;
+        }
+        // `_mm_add_ps(sum, _mm_movehl_ps(sum,sum))` then `_mm_add_ss` with
+        // `_mm_shuffle_ps(sum,sum,0x55)`: lane 0 becomes (s0+s2) + (s1+s3).
+        sum = _mm_add_ps(sum, _mm_movehl_ps(sum, sum));
+        sum = _mm_add_ss(sum, _mm_shuffle_ps::<0x55>(sum, sum));
+        let mut xy = _mm_cvtss_f32(sum);
+        while i < n {
+            let ii = i as usize;
+            xy = MAC16_16(xy, *x.get_unchecked(ii), *y.get_unchecked(ii));
+            i += 1;
+        }
+        xy
+    }
+}
+
 /// `celt/x86/pitch_sse.c:108` `celt_inner_prod_sse`.
 ///
 /// One 4-lane accumulator; the horizontal reduction is exactly
@@ -1004,23 +1201,32 @@ pub fn celt_inner_prod(x: &[f32], y: &[f32], n: i32) -> f32 {
     debug_assert!(n >= 0);
     debug_assert!(x.len() >= n as usize);
     debug_assert!(y.len() >= n as usize);
-    let mut sum = [0.0f32; 4];
-    let mut i: i32 = 0;
-    while i < n - 3 {
-        let ii = i as usize;
-        sum = v4_add(sum, v4_mul(v4_load(x, ii), v4_load(y, ii)));
-        i += 4;
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: SSE/SSE2 are baseline; the asserts above give the length
+        // contract of `celt_inner_prod_sse_hw`.
+        unsafe { celt_inner_prod_sse_hw(x, y, n) }
     }
-    // _mm_add_ps(sum, _mm_movehl_ps(sum,sum)) then _mm_add_ss with
-    // _mm_shuffle_ps(sum,sum,0x55): lane 0 becomes (s0+s2) + (s1+s3).
-    let t = v4_add(sum, [sum[2], sum[3], sum[2], sum[3]]);
-    let mut xy = t[0] + t[1];
-    while i < n {
-        let ii = i as usize;
-        xy = MAC16_16(xy, x[ii], y[ii]);
-        i += 1;
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut sum = [0.0f32; 4];
+        let mut i: i32 = 0;
+        while i < n - 3 {
+            let ii = i as usize;
+            sum = v4_add(sum, v4_mul(v4_load(x, ii), v4_load(y, ii)));
+            i += 4;
+        }
+        // _mm_add_ps(sum, _mm_movehl_ps(sum,sum)) then _mm_add_ss with
+        // _mm_shuffle_ps(sum,sum,0x55): lane 0 becomes (s0+s2) + (s1+s3).
+        let t = v4_add(sum, [sum[2], sum[3], sum[2], sum[3]]);
+        let mut xy = t[0] + t[1];
+        while i < n {
+            let ii = i as usize;
+            xy = MAC16_16(xy, x[ii], y[ii]);
+            i += 1;
+        }
+        xy
     }
-    xy
 }
 
 /// `celt/pitch.h:159` `celt_inner_prod_c` — plain sequential C reference.
@@ -1033,6 +1239,61 @@ pub fn celt_inner_prod_c(x: &[f32], y: &[f32], n: i32) -> f32 {
         i += 1;
     }
     xy
+}
+
+/// `celt/x86/pitch_sse.c:79` `dual_inner_prod_sse`, transcribed with
+/// `core::arch::x86_64` intrinsics (see [`celt_inner_prod_sse_hw`]).
+///
+/// `x.len() >= n >= 0`, `y01.len() >= n`, `y02.len() >= n`.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn dual_inner_prod_sse_hw(
+    x: &[f32],
+    y01: &[f32],
+    y02: &[f32],
+    n: i32,
+    xy1: &mut f32,
+    xy2: &mut f32,
+) {
+    use core::arch::x86_64::*;
+
+    // SAFETY: the vector loop runs while `i < n - 3` and loads
+    // `x[i..i+4]`, `y01[i..i+4]`, `y02[i..i+4]`, all in bounds by the caller's
+    // contract; the tail is scalar and `i < n` there.
+    unsafe {
+        let mut xsum1 = _mm_setzero_ps();
+        let mut xsum2 = _mm_setzero_ps();
+        let mut i: i32 = 0;
+        while i < n - 3 {
+            let ii = i as usize;
+            let xi = _mm_loadu_ps(x.as_ptr().add(ii));
+            xsum1 = _mm_add_ps(
+                xsum1,
+                _mm_mul_ps(xi, _mm_loadu_ps(y01.as_ptr().add(ii))),
+            );
+            xsum2 = _mm_add_ps(
+                xsum2,
+                _mm_mul_ps(xi, _mm_loadu_ps(y02.as_ptr().add(ii))),
+            );
+            i += 4;
+        }
+        /* Horizontal sum, one accumulator at a time, before the tail loop --
+           exactly the C order (`_mm_store_ss` both, then the scalar loop). */
+        xsum1 = _mm_add_ps(xsum1, _mm_movehl_ps(xsum1, xsum1));
+        xsum1 = _mm_add_ss(xsum1, _mm_shuffle_ps::<0x55>(xsum1, xsum1));
+        xsum2 = _mm_add_ps(xsum2, _mm_movehl_ps(xsum2, xsum2));
+        xsum2 = _mm_add_ss(xsum2, _mm_shuffle_ps::<0x55>(xsum2, xsum2));
+        let mut a = _mm_cvtss_f32(xsum1);
+        let mut b = _mm_cvtss_f32(xsum2);
+        while i < n {
+            let ii = i as usize;
+            a = MAC16_16(a, *x.get_unchecked(ii), *y01.get_unchecked(ii));
+            b = MAC16_16(b, *x.get_unchecked(ii), *y02.get_unchecked(ii));
+            i += 1;
+        }
+        *xy1 = a;
+        *xy2 = b;
+    }
 }
 
 /// `celt/x86/pitch_sse.c:79` `dual_inner_prod_sse`.
@@ -1052,28 +1313,37 @@ pub fn dual_inner_prod(
     debug_assert!(x.len() >= n as usize);
     debug_assert!(y01.len() >= n as usize);
     debug_assert!(y02.len() >= n as usize);
-    let mut xsum1 = [0.0f32; 4];
-    let mut xsum2 = [0.0f32; 4];
-    let mut i: i32 = 0;
-    while i < n - 3 {
-        let ii = i as usize;
-        let xi = v4_load(x, ii);
-        xsum1 = v4_add(xsum1, v4_mul(xi, v4_load(y01, ii)));
-        xsum2 = v4_add(xsum2, v4_mul(xi, v4_load(y02, ii)));
-        i += 4;
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: SSE/SSE2 are baseline; the asserts above give the length
+        // contract of `dual_inner_prod_sse_hw`.
+        unsafe { dual_inner_prod_sse_hw(x, y01, y02, n, xy1, xy2) }
     }
-    let t1 = v4_add(xsum1, [xsum1[2], xsum1[3], xsum1[2], xsum1[3]]);
-    let t2 = v4_add(xsum2, [xsum2[2], xsum2[3], xsum2[2], xsum2[3]]);
-    let mut a = t1[0] + t1[1];
-    let mut b = t2[0] + t2[1];
-    while i < n {
-        let ii = i as usize;
-        a = MAC16_16(a, x[ii], y01[ii]);
-        b = MAC16_16(b, x[ii], y02[ii]);
-        i += 1;
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut xsum1 = [0.0f32; 4];
+        let mut xsum2 = [0.0f32; 4];
+        let mut i: i32 = 0;
+        while i < n - 3 {
+            let ii = i as usize;
+            let xi = v4_load(x, ii);
+            xsum1 = v4_add(xsum1, v4_mul(xi, v4_load(y01, ii)));
+            xsum2 = v4_add(xsum2, v4_mul(xi, v4_load(y02, ii)));
+            i += 4;
+        }
+        let t1 = v4_add(xsum1, [xsum1[2], xsum1[3], xsum1[2], xsum1[3]]);
+        let t2 = v4_add(xsum2, [xsum2[2], xsum2[3], xsum2[2], xsum2[3]]);
+        let mut a = t1[0] + t1[1];
+        let mut b = t2[0] + t2[1];
+        while i < n {
+            let ii = i as usize;
+            a = MAC16_16(a, x[ii], y01[ii]);
+            b = MAC16_16(b, x[ii], y02[ii]);
+            i += 1;
+        }
+        *xy1 = a;
+        *xy2 = b;
     }
-    *xy1 = a;
-    *xy2 = b;
 }
 
 /// `celt/pitch.h:137` `dual_inner_prod_c` — plain sequential C reference.
@@ -1130,39 +1400,102 @@ pub fn comb_filter_const(y: &mut [f32], x: &[f32], t: i32, n: i32, g10: f32, g11
         x.len() >= n as usize + 4.max(t as usize + 2),
         "comb_filter_const: x needs N + max(4, T+2) elements"
     );
-    let g10v = splat4(g10);
-    let g11v = splat4(g11);
-    let g12v = splat4(g12);
-    let mut x0v = v4_load(x, 0);
-    let mut i: i32 = 0;
-    while i < n - 3 {
-        let ii = i as usize;
-        // yi = _mm_loadu_ps(x+i): the current output's direct term, i.e.
-        // x_c[i..i+4] == x_rust[i+T+2 .. i+T+6].
-        let yi = v4_load(x, ii + t as usize + 2);
-        let x4v = v4_load(x, ii + 4);
-        let x2v = shuffle_ps(x0v, x4v, 0x4e);
-        let x1v = shuffle_ps(x0v, x2v, 0x99);
-        let x3v = shuffle_ps(x2v, x4v, 0x99);
+    /* SSE is the x86-64 baseline (`OPUS_X86_PRESUME_SSE` in the reference
+       build), so the C body of `comb_filter_const_sse` is transcribed
+       instruction for instruction — including the `#else` "partial sums"
+       grouping `(g11·(x3+x1)) + (g12·(x4+x0))`, which is what makes it differ
+       from `comb_filter_const_c`.  The `[f32; 4]` emulation below stays as the
+       fallback. */
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::x86_64::*;
+        /* SAFETY: SSE is the x86-64 baseline, and the asserts above bound every
+           access: the loop's loads are `x[i+T+2 .. i+T+6]` and `x[i+4 .. i+8]`
+           for `i <= n-4` (all inside `n + T + 2` / `n + 4`), `x0v` starts at
+           `x[0..4]`, and the store writes `y[i .. i+4]` for `i <= n-4`. */
+        unsafe {
+            let g10v = _mm_load1_ps(&g10);
+            let g11v = _mm_load1_ps(&g11);
+            let g12v = _mm_load1_ps(&g12);
+            let mut x0v = _mm_loadu_ps(x.as_ptr());
+            let mut i: i32 = 0;
+            while i < n - 3 {
+                let ii = i as usize;
+                /* yi = _mm_loadu_ps(x+i): the current output's direct term,
+                   i.e. x_c[i..i+4] == x_rust[i+T+2 .. i+T+6]. */
+                let yi = _mm_loadu_ps(x.as_ptr().add(ii + t as usize + 2));
+                let x4v = _mm_loadu_ps(x.as_ptr().add(ii + 4));
+                let x2v = _mm_shuffle_ps(x0v, x4v, 0x4e);
+                let x1v = _mm_shuffle_ps(x0v, x2v, 0x99);
+                let x3v = _mm_shuffle_ps(x2v, x4v, 0x99);
 
-        let mut yi = v4_add(yi, v4_mul(g10v, x2v));
-        // Use partial sums
-        let yi2 = v4_add(
-            v4_mul(g11v, v4_add(x3v, x1v)),
-            v4_mul(g12v, v4_add(x4v, x0v)),
-        );
-        yi = v4_add(yi, yi2);
-        x0v = x4v;
-        v4_store(y, ii, yi);
-        i += 4;
+                let mut yi = _mm_add_ps(yi, _mm_mul_ps(g10v, x2v));
+                /* Use partial sums (`#else` branch of `#if 0`). */
+                let yi2 = _mm_add_ps(
+                    _mm_mul_ps(g11v, _mm_add_ps(x3v, x1v)),
+                    _mm_mul_ps(g12v, _mm_add_ps(x4v, x0v)),
+                );
+                yi = _mm_add_ps(yi, yi2);
+                x0v = x4v;
+                _mm_storeu_ps(y.as_mut_ptr().add(ii), yi);
+                i += 4;
+            }
+            comb_filter_const_tail(y, x, t as usize, n, i, g10, g11, g12);
+        }
+        return;
     }
-    // CUSTOM_MODES tail: plain left-to-right C expression
-    //   y[i] = x_c[i] + g10*x_c[i-T] + g11*(x_c[i-T+1]+x_c[i-T-1])
-    //                  + g12*(x_c[i-T+2]+x_c[i-T-2])
-    // with x_c[i] == x[i+T+2].
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let g10v = splat4(g10);
+        let g11v = splat4(g11);
+        let g12v = splat4(g12);
+        let mut x0v = v4_load(x, 0);
+        let mut i: i32 = 0;
+        while i < n - 3 {
+            let ii = i as usize;
+            // yi = _mm_loadu_ps(x+i): the current output's direct term, i.e.
+            // x_c[i..i+4] == x_rust[i+T+2 .. i+T+6].
+            let yi = v4_load(x, ii + t as usize + 2);
+            let x4v = v4_load(x, ii + 4);
+            let x2v = shuffle_ps(x0v, x4v, 0x4e);
+            let x1v = shuffle_ps(x0v, x2v, 0x99);
+            let x3v = shuffle_ps(x2v, x4v, 0x99);
+
+            let mut yi = v4_add(yi, v4_mul(g10v, x2v));
+            // Use partial sums
+            let yi2 = v4_add(
+                v4_mul(g11v, v4_add(x3v, x1v)),
+                v4_mul(g12v, v4_add(x4v, x0v)),
+            );
+            yi = v4_add(yi, yi2);
+            x0v = x4v;
+            v4_store(y, ii, yi);
+            i += 4;
+        }
+        comb_filter_const_tail(y, x, t as usize, n, i, g10, g11, g12);
+    }
+}
+
+/// `comb_filter_const_sse`'s `CUSTOM_MODES` tail: plain left-to-right C
+/// grouping
+/// `y[i] = x_c[i] + g10·x_c[i-T] + g11·(x_c[i-T+1]+x_c[i-T-1])
+///                + g12·(x_c[i-T+2]+x_c[i-T-2])`
+/// with `x_c[i] == x[i+T+2]`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn comb_filter_const_tail(
+    y: &mut [f32],
+    x: &[f32],
+    tt: usize,
+    n: i32,
+    from: i32,
+    g10: f32,
+    g11: f32,
+    g12: f32,
+) {
+    let mut i = from;
     while i < n {
         let ii = i as usize;
-        let tt = t as usize;
         let v = x[ii + tt + 2]
             + g10 * x[ii + 2]
             + g11 * (x[ii + 3] + x[ii + 1])
@@ -1229,8 +1562,10 @@ pub fn celt_fir(x: &[f32], num: &[f32], y: &mut [f32], n: i32, ord: i32) {
     debug_assert!(x.len() >= nn + oo, "celt_fir: x needs N + ord elements");
     let mut rnum_storage = [0.0f32; CELT_LPC_ORDER as usize];
     let rnum = &mut rnum_storage[..oo];
-    for i in 0..oo {
-        rnum[i] = num[oo - i - 1];
+    /* `for (i=0;i<ord;i++) rnum[i] = num[ord-i-1];` — reversed copy without a
+       per-element bounds check (the lengths are equal by construction). */
+    for (r, tap) in rnum.iter_mut().zip(num[..oo].iter().rev()) {
+        *r = *tap;
     }
     let mut i: i32 = 0;
     while i < n - 3 {
@@ -1591,26 +1926,59 @@ pub fn op_pvq_search_sse2(x: &[f32], iy: &mut [i32], k: i32, n: i32, _arch: i32)
     let mut xx_storage = [0.0f32; MAX_PVQ_N + 3];
     let mut y_storage = [0.0f32; MAX_PVQ_N + 3];
     let mut signy_storage = [0.0f32; MAX_PVQ_N + 3];
-    let mut xx: &mut [f32] = if nn + 3 <= MAX_PVQ_N + 3 {
+    let xx: &mut [f32] = if nn + 3 <= MAX_PVQ_N + 3 {
         &mut xx_storage[..nn + 3]
     } else {
         xx_heap.resize(nn + 3, 0.0);
         xx_heap.as_mut_slice()
     };
     xx[..nn].copy_from_slice(&x[..nn]);
-    let mut y: &mut [f32] = if nn + 3 <= MAX_PVQ_N + 3 {
+    let y: &mut [f32] = if nn + 3 <= MAX_PVQ_N + 3 {
         &mut y_storage[..nn + 3]
     } else {
         y_heap.resize(nn + 3, 0.0);
         y_heap.as_mut_slice()
     };
-    let mut signy: &mut [f32] = if nn + 3 <= MAX_PVQ_N + 3 {
+    let signy: &mut [f32] = if nn + 3 <= MAX_PVQ_N + 3 {
         &mut signy_storage[..nn + 3]
     } else {
         signy_heap.resize(nn + 3, 0.0);
         signy_heap.as_mut_slice()
     };
 
+
+    /* `OPUS_X86_PRESUME_SSE2` wires the macro to `op_pvq_search_sse2` at every
+       arch and SSE2 is part of the x86-64 baseline, so the C body is
+       transcribed below with real intrinsics: one `_mm_storeu_si128` per four
+       lanes (`v4_store`-style checked stores before), `_mm_shuffle_ps` /
+       `_mm_shuffle_epi32` instead of lane-array shuffles, the hardware
+       `_mm_rcp_ps` / `_mm_rsqrt_ps`, `_mm_cvttps_epi32`, and `_mm_max_epi16`
+       for the index tie-break.  The portable lane emulation is kept for
+       non-x86_64 targets. */
+    #[cfg(target_arch = "x86_64")]
+    {
+        return op_pvq_search_sse2_hw(xx, y, signy, iy, k, n);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        return op_pvq_search_sse2_emu(xx, y, signy, iy, k, n);
+    }
+}
+
+
+/// The portable `[f32; 4]` lane emulation of [`op_pvq_search_sse2`], kept for
+/// targets without SSE2.  On x86_64 the intrinsics transcription is used.
+#[cfg(not(target_arch = "x86_64"))]
+#[allow(clippy::too_many_arguments)]
+fn op_pvq_search_sse2_emu(
+    mut xx: &mut [f32],
+    mut y: &mut [f32],
+    mut signy: &mut [f32],
+    iy: &mut [i32],
+    k: i32,
+    n: i32,
+) -> f32 {
+    let nn = n as usize;
     // Get rid of the sign
     let mut sums = [0.0f32; 4];
     let mut j = 0usize;
@@ -1794,7 +2162,187 @@ pub fn op_pvq_search_sse2(x: &[f32], iy: &mut [i32], k: i32, n: i32, _arch: i32)
         iy[j + 3] = out[3];
         j += 4;
     }
-    yy
+    yy}
+
+/// The C body of [`op_pvq_search_sse2`] (`celt/x86/vq_sse2.c:44`), transcribed
+/// with SSE2 intrinsics.
+///
+/// `xx` is the C local `X`, `y` and `signy` are its other two `VARDECL`
+/// buffers, all `N+3` long; `iy` is the `N+3` output.  Nothing here changes the
+/// operation order of the C: the two `_mm_shuffle_ps` reductions
+/// (`0x4E` then `0xB1`), the `(K+.8) * _mm_rcp_ps(sums)` projection, the
+/// "double `y`" convention, the `_mm_max_epi16` tie-break chain and the final
+/// `_mm_xor_si128` sign restore are the same instructions.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+fn op_pvq_search_sse2_hw(
+    xx: &mut [f32],
+    y: &mut [f32],
+    signy: &mut [f32],
+    iy: &mut [i32],
+    k: i32,
+    n: i32,
+) -> f32 {
+    use core::arch::x86_64::*;
+    let nn = n as usize;
+    /* SAFETY: SSE2 is part of the x86-64 baseline.  `xx`, `y`, `signy` and `iy`
+       are all at least `nn + 3` elements, which is the C `ALLOC(..., N+3, ...)`
+       size; every 4-wide load/store below starts at a `j < nn` that is a
+       multiple of 4 and therefore touches at most indices `nn+2`. */
+    unsafe {
+        let xp = xx.as_mut_ptr();
+        let yp = y.as_mut_ptr();
+        let sp = signy.as_mut_ptr();
+        let ip = iy.as_mut_ptr();
+        /* All bits set to zero, except for the sign bit. */
+        let signmask = _mm_set_ps1(-0.0);
+        let fours = _mm_set1_epi32(4);
+        let zero = _mm_setzero_ps();
+
+        let mut sums = _mm_setzero_ps();
+        let mut j = 0usize;
+        while j < nn {
+            let mut x4 = _mm_loadu_ps(xp.add(j));
+            let s4 = _mm_cmplt_ps(x4, zero);
+            /* Get rid of the sign */
+            x4 = _mm_andnot_ps(signmask, x4);
+            sums = _mm_add_ps(sums, x4);
+            /* Clear y and iy in case we don't do the projection. */
+            _mm_storeu_ps(yp.add(j), zero);
+            _mm_storeu_si128(ip.add(j) as *mut __m128i, _mm_setzero_si128());
+            _mm_storeu_ps(xp.add(j), x4);
+            _mm_storeu_ps(sp.add(j), s4);
+            j += 4;
+        }
+        sums = _mm_add_ps(sums, _mm_shuffle_ps::<0x4e>(sums, sums));
+        sums = _mm_add_ps(sums, _mm_shuffle_ps::<0xb1>(sums, sums));
+
+        let mut xy: f32 = 0.0;
+        let mut yy: f32 = 0.0;
+        let mut pulses_left = k;
+
+        /* Do a pre-search by projecting on the pyramid */
+        if k > (n >> 1) {
+            let sum = _mm_cvtss_f32(sums);
+            /* If X is too small, just replace it with a pulse at 0.  Prevents
+               infinities and NaNs from causing too many pulses to be
+               allocated.  64 is an approximation of infinity here. */
+            if !(sum > EPSILON && sum < 64.0) {
+                *xp = QCONST16(1.0, 14);
+                let mut j = 1usize;
+                while j < nn {
+                    *xp.add(j) = 0.0;
+                    j += 1;
+                }
+                sums = _mm_set_ps1(1.0);
+            }
+            /* Using K+e with e < 1 guarantees we cannot get more than K pulses. */
+            let rcp4 = _mm_mul_ps(_mm_set_ps1((k as f64 + 0.8) as f32), _mm_rcp_ps(sums));
+            let mut xy4 = _mm_setzero_ps();
+            let mut yy4 = _mm_setzero_ps();
+            let mut pulses_sum = _mm_setzero_si128();
+            let mut j = 0usize;
+            while j < nn {
+                let x4 = _mm_loadu_ps(xp.add(j));
+                let rx4 = _mm_mul_ps(x4, rcp4);
+                let iy4 = _mm_cvttps_epi32(rx4);
+                pulses_sum = _mm_add_epi32(pulses_sum, iy4);
+                _mm_storeu_si128(ip.add(j) as *mut __m128i, iy4);
+                let y4 = _mm_cvtepi32_ps(iy4);
+                xy4 = _mm_add_ps(xy4, _mm_mul_ps(x4, y4));
+                yy4 = _mm_add_ps(yy4, _mm_mul_ps(y4, y4));
+                /* double the y[] vector so we don't have to do it in the search loop. */
+                _mm_storeu_ps(yp.add(j), _mm_add_ps(y4, y4));
+                j += 4;
+            }
+            pulses_sum = _mm_add_epi32(pulses_sum, _mm_shuffle_epi32::<0x4e>(pulses_sum));
+            pulses_sum = _mm_add_epi32(pulses_sum, _mm_shuffle_epi32::<0xb1>(pulses_sum));
+            pulses_left -= _mm_cvtsi128_si32(pulses_sum);
+            xy4 = _mm_add_ps(xy4, _mm_shuffle_ps::<0x4e>(xy4, xy4));
+            xy4 = _mm_add_ps(xy4, _mm_shuffle_ps::<0xb1>(xy4, xy4));
+            xy = _mm_cvtss_f32(xy4);
+            yy4 = _mm_add_ps(yy4, _mm_shuffle_ps::<0x4e>(yy4, yy4));
+            yy4 = _mm_add_ps(yy4, _mm_shuffle_ps::<0xb1>(yy4, yy4));
+            yy = _mm_cvtss_f32(yy4);
+        }
+        *xp.add(nn) = -100.0;
+        *xp.add(nn + 1) = -100.0;
+        *xp.add(nn + 2) = -100.0;
+        *yp.add(nn) = 100.0;
+        *yp.add(nn + 1) = 100.0;
+        *yp.add(nn + 2) = 100.0;
+        celt_sig_assert!(pulses_left >= 0);
+
+        /* This should never happen, but just in case it does (e.g. on silence)
+           we fill the first bin with pulses. */
+        if pulses_left > n + 3 {
+            let tmp = pulses_left as f32;
+            yy = MAC16_16(yy, tmp, tmp);
+            yy = MAC16_16(yy, tmp, *yp);
+            *ip += pulses_left;
+            pulses_left = 0;
+        }
+
+        let mut i = 0i32;
+        while i < pulses_left {
+            /* The squared magnitude term gets added anyway, so we might as well
+               add it outside the loop */
+            yy = ADD16(yy, 1.0);
+            let xy4 = _mm_set1_ps(xy);
+            let yy4 = _mm_set1_ps(yy);
+            let mut max = _mm_setzero_ps();
+            let mut pos = _mm_setzero_si128();
+            let mut count = _mm_set_epi32(3, 2, 1, 0);
+            let mut j = 0usize;
+            while j < nn {
+                let x4 = _mm_add_ps(_mm_loadu_ps(xp.add(j)), xy4);
+                let y4 = _mm_add_ps(_mm_loadu_ps(yp.add(j)), yy4);
+                let y4 = _mm_rsqrt_ps(y4);
+                let r4 = _mm_mul_ps(x4, y4);
+                /* Update the index of the max. */
+                pos = _mm_max_epi16(
+                    pos,
+                    _mm_and_si128(count, _mm_castps_si128(_mm_cmpgt_ps(r4, max))),
+                );
+                /* Update the max. */
+                max = _mm_max_ps(max, r4);
+                /* Update the indices (+4) */
+                count = _mm_add_epi32(count, fours);
+                j += 4;
+            }
+            /* Horizontal max */
+            let mut max2 = _mm_max_ps(max, _mm_shuffle_ps::<0x4e>(max, max));
+            max2 = _mm_max_ps(max2, _mm_shuffle_ps::<0xb1>(max2, max2));
+            /* Now that max2 contains the max at all positions, look at which
+               value(s) of the partial max is equal to the global max. */
+            pos = _mm_and_si128(pos, _mm_castps_si128(_mm_cmpeq_ps(max, max2)));
+            pos = _mm_max_epi16(pos, _mm_unpackhi_epi64(pos, pos));
+            pos = _mm_max_epi16(pos, _mm_shufflelo_epi16::<0x4e>(pos));
+            let best_id = _mm_cvtsi128_si32(pos) as usize;
+
+            /* Updating the sums of the new pulse(s) */
+            xy = ADD32(xy, *xp.add(best_id));
+            /* We're multiplying y[j] by two so we don't have to do it here */
+            yy = ADD16(yy, *yp.add(best_id));
+
+            /* Only now that we've made the final choice, update y/iy */
+            /* Multiplying y[j] by 2 so we don't have to do it everywhere else */
+            *yp.add(best_id) += 2.0;
+            *ip.add(best_id) += 1;
+            i += 1;
+        }
+
+        /* Put the original sign back */
+        let mut j = 0usize;
+        while j < nn {
+            let y4 = _mm_loadu_si128(ip.add(j) as *const __m128i);
+            let s4 = _mm_loadu_si128(sp.add(j) as *const __m128i);
+            let r = _mm_xor_si128(_mm_add_epi32(y4, s4), s4);
+            _mm_storeu_si128(ip.add(j) as *mut __m128i, r);
+            j += 4;
+        }
+        yy
+    }
 }
 
 /// `celt/vq.c:205` `op_pvq_search_c` — the plain-C reference (not reachable in

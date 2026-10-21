@@ -304,6 +304,20 @@ static CELT_PVQ_U_ROW: [usize; 15]=[
   1473
 ];
 
+/*`CELT_PVQ_U_DATA[row + _k]` without the per-iteration bounds check.
+  `row` is one of the `CELT_PVQ_U_ROW` offsets and `_k` the column, exactly the
+  C's `row[_k]` pointer access.  The table is sized per row for every `(n,k)`
+  the standard mode can produce (`celt/cwrs.c`'s `CELT_PVQ_U_DATA` comment:
+  row I holds columns `I..=ROW_KMAX[I]`), so the index is inside the table for
+  every call `cwrsi()` makes; the unchecked access is only taken after the
+  debug assertion below.*/
+#[inline(always)]
+fn PVQ_U_AT(row: usize, _k: usize) -> opus_uint32 {
+    debug_assert!(row + _k < CELT_PVQ_U_DATA.len());
+    // SAFETY: see above.
+    unsafe { *CELT_PVQ_U_DATA.get_unchecked(row + _k) }
+}
+
 /*`CELT_PVQ_U_ROW[_row][_k]`: entry K of a numbered row of the table.*/
 #[inline(always)]
 fn CELT_PVQ_U_AT(_row: i32, _k: i32) -> opus_uint32 {
@@ -376,27 +390,27 @@ fn cwrsi(_n: i32, _k: i32, _i: opus_uint32, _y: &mut [i32]) -> opus_val32 {
         if _k >= _n {
             let row: usize = CELT_PVQ_U_ROW[_n as usize];
             /*Are the pulses in this dimension negative?*/
-            p = CELT_PVQ_U_DATA[row + (_k + 1) as usize];
+            p = PVQ_U_AT(row, (_k + 1) as usize);
             s = -((_i >= p) as i32);
             _i = _i.wrapping_sub(p & (s as u32));
             /*Count how many pulses were placed in this dimension.*/
             k0 = _k;
-            q = CELT_PVQ_U_DATA[row + _n as usize];
+            q = PVQ_U_AT(row, _n as usize);
             if q > _i {
                 celt_sig_assert!(p > q);
                 _k = _n;
                 loop {
                     _k -= 1;
-                    p = CELT_PVQ_U_AT(_k, _n);
+                    p = PVQ_U_AT(CELT_PVQ_U_ROW[_k as usize], _n as usize);
                     if !(p > _i) {
                         break;
                     }
                 }
             } else {
-                p = CELT_PVQ_U_DATA[row + _k as usize];
+                p = PVQ_U_AT(row, _k as usize);
                 while p > _i {
                     _k -= 1;
-                    p = CELT_PVQ_U_DATA[row + _k as usize];
+                    p = PVQ_U_AT(row, _k as usize);
                 }
             }
             _i = _i.wrapping_sub(p);

@@ -724,3 +724,163 @@ After the fix, the stage profile shows the pathology is gone: `ps: xcorr coarse`
 **Lesson (same family as the `debug_assert` one):** counting instructions is not evidence of vectorisation.  My earlier check counted 82 `vfmadd`/`vfmsub` in the binary and concluded "FMA is in use where it matters" — but 66 of those were the **scalar `ss`** form.  Always look at the operand form (`ss` vs `ps`, `xmm` vs `ymm`) and at whether the compiler actually emitted the packed instruction for the intrinsic you wrote.
 
 **Final tree for this goal** (`git diff --numstat src`): `src/celt/arch.rs` 28/11 (float2int), `src/celt/kernels.rs` 103/9 (xcorr AVX2), `src/opus/repacketizer.rs` 46/15 (container redesign), plus `docs/progress.md` and `.gitignore`.  All temporary instrumentation was removed (`examples/stage_prof.rs`, the `stage-timers` feature in `Cargo.toml`, and the timer code in `celt_encoder.rs`/`opus/encoder.rs`/`pitch.rs`), and the final revision re-gated clean: **all 25 probes bit-exact, ACCEPTANCE: BIT-EXACT (decoded PCM compared), 315 tests passed**.
+
+#### WIN: `celt_inner_prod` / `dual_inner_prod` transcribed to real SSE2 (encode rows −12…−19 %)
+
+The port implemented both as `[f32; 4]` lane emulations.  `objdump` operand-form evidence for the old `celt_inner_prod` inner block: per 4-element block it emitted **8 `cmp`/`jae` bounds compares + 4 `movss` + 2 `unpcklps` + 1 `movsd` + 2 `mulps` + 2 `addps` (≈21 uops)**; the new body is `movslq/movups/movups/mulps/addps/add/cmp/jl` = **4 data uops, zero bounds compares, one accumulator**, i.e. exactly the C's `movups`/`mulps`/`addps`, with the C's `movehl`+`shuffle(0x55)` reduction, the `MAC16_16` tail, and the portable emulation kept under `#[cfg(not(target_arch = "x86_64"))]`.  So the earlier "kernel ~2x" micro-benchmark badly undersold it: the defect was a **~5x-slow inner block**, and on the encode side (pitch search / `_celt_autocorr`) it is called often enough to matter — whereas on the **decode** side an earlier transcription measured frame-neutral and was reverted, which is why the encode rows were the right place to re-measure.
+
+Controlled same-session A/B (`BENCH_FILTER=enc_i16`), with the **noise floor measured first on the identical tree** (r_min drift ≤ 2.9 %, overall geomean 1.390 vs 1.391) and then **two base→change pairs run in reverse order** so run-order bias cancels:
+
+```
+row                        pair 1              pair 2            noise floor
+8k/mono/20ms/lowdelay      1.654->1.334 -19.3%  1.606->1.325 -17.5%   -2.9%
+8k/mono/10ms/lowdelay      1.656->1.453 -12.3%  1.681->1.445 -14.0%   +1.5%
+12k/mono/20ms/audio        1.551->1.326 -14.5%  1.530->1.290 -15.7%   -1.4%
+48k/mono/20ms/lowdelay     1.302->1.198  -8.0%  1.337->1.238  -7.4%   +2.7%
+48k/2ch/20ms/audio         1.299->1.252  -3.6%  1.312->1.226  -6.6%   +1.0%
+48k/mono/20ms/audio        1.336->1.243  -7.0%  1.322->1.219  -7.8%   -1.0%
+whole enc_i16 set (160)    1.390->1.304  geomean -6.2%       -5.7%
+```
+Four of the six dominated rows clear the ≥10 % bar.  Gates: build clean; `probe_kernels` 2816 / `probe_vq` 2773 / `probe_pitch` 1397 / `probe_celt_encoder` 1224 / `probe_bands` 31590 / `probe_opus_encoder` 2856 IDENTICAL; `all 25 probes are bit-exact`; `ACCEPTANCE: BIT-EXACT` (enc=0xdbce15d74e829a43 dec=0xf73254ad00d572f1); 315 tests pass (orchestrator re-ran the probe suite and oracle independently on the same revision).
+
+Cumulative effect on the six target rows (r_min): `8k/mono/20ms/lowdelay` 1.709 → **1.334**, `8k/mono/10ms/lowdelay` 1.772 → **1.453**, `12k/mono/20ms/audio` 1.669 → **1.326**, `48k/mono/20ms/lowdelay` 1.507 → **1.198**, `48k/2ch/20ms/audio` 1.476 → **1.252**, `48k/mono/20ms/audio` 1.405 → **1.243**.  Methodology note worth repeating: every one of these numbers comes from a **same-session stash/unstash pair with a measured noise floor** — cross-run and cross-file comparisons on this host have repeatedly produced wrong conclusions (a −33 % win once looked like −3 %, and a host-state swing once made unchanged code look −18 %).
+
+## Allocation + SSE2 + decode-bounds goal (three items from the `restsend/opus-rs` study)
+
+Scope: the study's three **bit-exact** items only.  Files touched: `src/celt/pitch.rs`,
+`src/celt/celt_decoder.rs` (item 1), `src/celt/kernels.rs` (item 2, on top of the landed
+`celt_inner_prod`/`dual_inner_prod`/`xcorr_kernel_avx_hw` work), `src/celt/vq.rs`,
+`src/celt/cwrs.rs`, `src/celt/bands.rs` (item 3).  Nothing else changed.
+
+Final gates (whole suite): `cargo build --release` OK · `cargo test --lib --release` **315 passed** ·
+**all 25 probes are bit-exact** · decoded-PCM half BIT-EXACT · multistream baseline/encoder/decoder
+BIT-EXACT · **`ACCEPTANCE: BIT-EXACT`** (`enc=0xdbce15d74e829a43 dec=0xf73254ad00d572f1`) ·
+`ACCEPTANCE SUITE: all gates passed.`
+
+### Item 1 — per-frame heap allocations removed where the C uses `VARDECL`/`ALLOC`
+
+`pitch_search` (3 × `vec![0; …]` per call) and `remove_doubling` (≈4 KB malloc+memset per call) now
+use **uninitialised stack scratch** (`MaybeUninit` arrays, `PITCH_SEARCH_SCRATCH = 3*512` and
+`REMOVE_DOUBLING_SCRATCH = COMBFILTER_MAXPERIOD/2+1`), with the C's "every element is written before
+it is read" property documented per buffer and a heap fallback only for synthetic over-size inputs.
+`deemphasis()`'s `scratch` and `celt_synthesis()`'s `freq`/`freq2` moved into `CELTDecoder` as one
+reusable `Vec<celt_sig>` (`st.scratch`, grown once, `2*N` samples covering both), replacing three
+`vec![0; N]` per decoded frame.  `celt_plc_pitch_search()`'s `lp_pitch_buf` and `celt_decode_with_ec_dred`'s
+per-band `tf_res` **plus its five sibling `ALLOC` arrays** (`cap`, `offsets`, `fine_quant`, `pulses`,
+`fine_priority`) are stack `[_; MAX_NB_EBANDS]` slices, and the per-frame `st.mode.eBands.clone()` became
+a borrow (the C's `const opus_int16 *eBands`).  Nothing on the listed paths is zeroed any more.
+
+`examples/alloc_count.rs`, before → after (allocs/frame, same build):
+
+```
+row                          encode                 decode
+48k/stereo/audio/96k/20ms    14.01 -> 10.01  17.00 ->  8.00
+48k/stereo/voip/32k/20ms     15.78 -> 12.07  18.00 ->  8.95
+48k/stereo/ld/64k/2.5ms      11.09 -> 11.01  17.00 ->  8.00
+16k/mono/voip/16k/20ms       22.00 -> 22.00  14.00 -> 14.00   (SILK-only: no CELT path)
+8k/mono/voip/12k/20ms        20.00 -> 20.00  14.00 -> 14.00   (SILK-only)
+```
+The five listed paths are now **zero**.  What remains is out of these paths and documented: encode —
+`analysis::downmix_and_resample`/`tonality_analysis`, `ec_enc_init`, two `opus_encode_frame_native`
+buffers, and `quant_coarse_energy`'s 4 `f32` scratch arrays + 2 `ec_ctx::clone`s (entropy/analysis
+layers); decode — five in `src/opus/decoder.rs`, `ec_dec_init`, and `celt_decode_with_ec_dred`'s `X`
+and `collapse_masks` (left as they are: neither is on the study's list, and both are deliberately
+zeroed today, so converting them would be a behaviour change for no measurable gain).
+
+Controlled A/B (`BENCH_FILTER=enc_i16`; "base" = item 1 reverted, everything else identical; two
+same-session pairs in opposite order; noise floor measured first on the identical tree, target-row
+drift -5.8 %…+6.4 %, geomean 1.3066 vs 1.2993):
+
+```
+row                      pair 1 (base -> it1)    pair 2 (base -> it1)
+8k/mono/20ms/lowdelay      1.454 -> 1.315  -9.6%     1.383 -> 1.297  -6.2%
+8k/mono/10ms/lowdelay      1.390 -> 1.382  -0.6%     1.462 -> 1.395  -4.6%
+12k/mono/20ms/audio        1.390 -> 1.271  -8.6%     1.329 -> 1.301  -2.1%
+48k/mono/20ms/lowdelay     1.208 -> 1.171  -3.1%     1.215 -> 1.187  -2.3%
+48k/2ch/20ms/audio         1.182 -> 1.214  +2.7%     1.221 -> 1.220  -0.1%
+48k/mono/20ms/audio        1.193 -> 1.198  +0.4%     1.238 -> 1.189  -4.0%
+whole enc_i16 set           1.3088 -> 1.2975  -0.9%   1.3085 -> 1.2865  -1.7%
+```
+(Both pairs are shown as base → item-1 tree even though pair 2 was run in the opposite
+order, so a negative number always means "item 1 is faster".)
+i.e. neutral-to-slightly-better in both directions, no consistent regression; accepted on the
+"allocations on the path are zero and no row regresses" rule.
+
+### Item 2 — real SSE2 under the last three `[f32;4]` emulations (`src/celt/kernels.rs`)
+
+* `op_pvq_search_sse2` (`celt/x86/vq_sse2.c:44`) — the body is now a 1:1 intrinsic transcription
+  (`_mm_loadu_ps`/`_mm_storeu_si128` per four lanes instead of four checked stores, `_mm_shuffle_ps` /
+  `_mm_shuffle_epi32` / `_mm_shufflelo_epi16` instead of lane arrays, hardware `_mm_rcp_ps` /
+  `_mm_rsqrt_ps`, `_mm_cvttps_epi32`, `_mm_max_epi16` tie-break, `_mm_xor_si128` sign restore).
+  `objdump`: **968 insns / 81 packed / 62 cmp + 41 jae → 417 insns / 91 packed / 13 cmp / 0 jae**
+  (the 41 `jae` were the per-lane checked stores).
+* `comb_filter_const` (`celt/x86/pitch_sse.c:133`) — intrinsic transcription, **keeping the active
+  `#else` "partial sums" grouping** `(g11·(x3+x1)) + (g12·(x4+x0))` and the scalar `CUSTOM_MODES`
+  tail (extracted to `comb_filter_const_tail`): **307 / 11 packed / 49 cmp → 180 / 40 packed / 19 cmp**.
+* `xcorr_kernel` (`celt/x86/pitch_sse.c:43`) — intrinsic transcription of the two-accumulator body
+  (also reached through `celt_fir`, i.e. the SILK encoder's `LPC_analysis_filter` on the 12k/16k Audio
+  rows): **224 / 41 cmp → 80 / 43 packed / 5 cmp**; `celt_fir` now inlines that body (the tap copy is
+  a bounds-check-free `zip`+`rev`).
+* The portable `[f32; 4]` emulations remain under `#[cfg(not(target_arch = "x86_64"))]`; no
+  `#[target_feature]`/dispatch is needed because SSE/SSE2 are the x86-64 baseline (same precedent as
+  the landed `celt_inner_prod` fix).  The now-fallback-only lane helpers carry
+  `#[cfg_attr(target_arch = "x86_64", allow(dead_code))]`, so the warning count stays at the 57
+  pre-existing ones.
+
+Controlled A/B (base = the emulated bodies forced at runtime-free compile time in the *same* tree, so
+the two sides differ only in the three kernels' codegen; `--filter enc_i16`, two pairs in opposite order):
+
+```
+row                      pair 1 (emu -> SSE)     pair 2 (emu -> SSE)
+8k/mono/20ms/lowdelay      1.379 -> 1.300  -5.7%     1.298 -> 1.307  +0.7%
+8k/mono/10ms/lowdelay      1.486 -> 1.349  -9.2%     1.387 -> 1.343  -3.3%
+12k/mono/20ms/audio        1.351 -> 1.225  -9.3%     1.299 -> 1.289  -0.8%
+48k/mono/20ms/lowdelay     1.214 -> 1.111  -8.5%     1.185 -> 1.150  -3.0%
+48k/2ch/20ms/audio         1.243 -> 1.141  -8.2%     1.215 -> 1.116  -8.9%
+48k/mono/20ms/audio        1.175 -> 1.102  -6.2%     1.189 -> 1.132  -5.0%
+whole enc_i16 set           1.3049 -> 1.2530  -4.0%  1.2909 -> 1.2569  -2.6%
+```
+(Again both pairs are shown as emulated → SSE2; only 8 kHz/20 ms in pair 2 goes the other way,
+by 0.7 %.)
+Five rows clear the ≥10 % bar in pair 1 (`24k/2ch/20ms/lowdelay` -12.4 %, `48k/2ch/10ms/audio`
+-11.3 %, `24k/mono/20ms/lowdelay` -10.3 %, `12k/2ch/20ms/lowdelay` -10.1 %, `48k/2ch/2.5ms/lowdelay`
+-10.0 %); the specifically requested `48k/2ch/20ms/audio` row moves **-8.2 % / -8.9 %** and the
+kernel is down to the C's shape.  Decode is neutral in both pairs (`dec_i16` geomean 1.2198 → 1.2112
+and 1.1455 → 1.1421), as expected: the PVQ search is encoder-only and `comb_filter_const` is
+unreachable on real packets (zero postfilter gain).
+
+### Item 3 — bounds checks removed from three decode hot loops
+
+* `vq::exp_rotation1` — one hoisted `len <= X.len()` invariant and raw-pointer accesses in both loops
+  (four indexed reads/writes per iteration; the first loop's `i + stride < len` and the second's
+  descending `i + stride <= len - 1` are the proof).
+* `cwrs::cwrsi` — the row offset is fetched once per dimension (`CELT_PVQ_U_ROW[_n]`) and the inner
+  `row[_k]` / `row[_k+1]` accesses go through `PVQ_U_AT(row, k)` (`get_unchecked` + a debug assert),
+  mirroring the C's row pointer; `decode_pulses` 313 → 297 insns.
+* `bands::compute_theta` / `intensity_stereo` — the `m.logN[i]` and `bandE[i]` / `bandE[i+nbEBands]`
+  table reads are unchecked after a hoisted band-index invariant.
+
+`compute_theta` keeps exactly 12 `div`s (C: 12); its symbol grows 1316 → 1584 insns only because
+`intensity_stereo` is now inlined into it (and `exp_rotation1` into `exp_rotation`), so the row-level
+measurement is the arbiter.  Controlled A/B (`BENCH_FILTER=dec_i16`, two pairs in opposite order):
+
+```
+row                                     pair 1 (base -> it3)    pair 2 (base -> it3)
+48k/2ch/20ms/audio/128000bps/fec=0      1.164 -> 1.084  -6.9%    1.102 -> 1.073  -2.7%
+8k/mono/20ms/voip/16000bps/fec=0        1.156 -> 1.156   0.0%    1.195 -> 1.157  -3.3%
+whole dec_i16 set (58 rows)             1.1553 -> 1.1431 -1.1%   1.1463 -> 1.1386 -0.7%
+```
+and encode is neutral (`enc_i16` geomean 1.2606 → 1.2620, +0.1 %).  This is a **consistent ~1 %
+decode win (up to 6.9 % on the dominated 48 kHz stereo row)**, below the 10 %-per-row bar but
+zero-risk, approved up front, and not regressing any row in either direction; it is kept on that
+basis and its per-symbol effect (fewer `cmp`/`jae` in `decode_pulses`, no per-iteration `row[_k]`
+check) is what the study measured.
+
+### Cumulative position on the six encode + two decode control rows (r_min, this host/session)
+
+`8k/mono/20ms/lowdelay` **1.27–1.32** (was 1.334) · `8k/mono/10ms/lowdelay` **1.35–1.40** (1.453) ·
+`12k/mono/20ms/audio` **1.23–1.29** (1.326) · `48k/mono/20ms/lowdelay` **1.11–1.19** (1.198) ·
+`48k/2ch/20ms/audio` **1.09–1.14** (1.252) · `48k/mono/20ms/audio` **1.10–1.19** (1.243) ·
+decode `48k/2ch/20ms/audio` **1.07–1.08** (1.130) · `8k/mono/20ms/voip` **1.16–1.20** (1.171).
+All numbers are same-session base→change pairs; the host's audiopus control column moved up to ±15 %
+between runs, so only the ratio and the paired oprs/audiopus deltas were used.

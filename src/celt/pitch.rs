@@ -76,11 +76,13 @@
 //! becomes `&[&[celt_sig]]`; `x_lp` is written in place.
 
 use super::arch::*;
+use super::celt::COMBFILTER_MAXPERIOD;
 use super::celt_lpc::{_celt_autocorr, _celt_lpc};
 use super::entcode::celt_udiv;
 use super::kernels;
 use super::mathops::{celt_sqrt, frac_div32};
 use crate::types::*;
+use core::mem::MaybeUninit;
 
 /// `celt/pitch.c:45` `find_best_pitch` (static in C; `pub` here so the probe
 /// can exercise it directly — the reference source is compiled into the probe
@@ -243,6 +245,14 @@ pub fn celt_pitch_xcorr_c(
     kernels::celt_pitch_xcorr_c(x, y, xcorr, len, max_pitch);
 }
 
+/// Capacity (in `opus_val16`) of the [`pitch_search`] scratch buffers:
+/// `x_lp4 + y_lp4 + xcorr == len/4 + (len+max_pitch)/4 + max_pitch/2`.  Every
+/// call the codec makes fits (the encoder needs 240+484+489, the PLC path
+/// 332+487+310); the heap fallback below only keeps synthetic parameters
+/// supported.  The C uses `VARDECL`/`ALLOC`, i.e. uninitialised stack storage,
+/// and every element is written before it is read.
+const PITCH_SEARCH_SCRATCH: usize = 3 * 512;
+
 /// `celt/pitch.c:307` `pitch_search`.
 ///
 /// `x_lp` and `y` point at the buffers the C caller passes; `y` must provide
@@ -256,17 +266,54 @@ pub fn pitch_search(
     pitch: &mut i32,
     arch: i32,
 ) {
+    celt_assert!(len > 0);
+    celt_assert!(max_pitch > 0);
+    let n_x_lp4 = (len >> 2) as usize;
+    let n_y_lp4 = ((len + max_pitch) >> 2) as usize;
+    let n_xcorr = (max_pitch >> 1) as usize;
+    if n_x_lp4 + n_y_lp4 + n_xcorr <= PITCH_SEARCH_SCRATCH {
+        /* SAFETY: `opus_val16` is `f32`, so every bit pattern is a valid value,
+           and `pitch_search_impl` writes every element of the three buffers
+           before reading it (the downsampling loops fill `x_lp4`/`y_lp4`, then
+           the coarse and fine correlation passes fill `xcorr`).  This is the C
+           `VARDECL`/`ALLOC` scratch, so it must not be zero-initialised. */
+        let mut storage = [MaybeUninit::<opus_val16>::uninit(); PITCH_SEARCH_SCRATCH];
+        let scratch = unsafe {
+            core::slice::from_raw_parts_mut(
+                storage.as_mut_ptr() as *mut opus_val16,
+                n_x_lp4 + n_y_lp4 + n_xcorr,
+            )
+        };
+        let (x_lp4, rest) = scratch.split_at_mut(n_x_lp4);
+        let (y_lp4, xcorr) = rest.split_at_mut(n_y_lp4);
+        pitch_search_impl(x_lp, y, len, max_pitch, pitch, arch, x_lp4, y_lp4, xcorr);
+    } else {
+        let mut scratch = vec![0 as opus_val16; n_x_lp4 + n_y_lp4 + n_xcorr];
+        let (x_lp4, rest) = scratch.split_at_mut(n_x_lp4);
+        let (y_lp4, xcorr) = rest.split_at_mut(n_y_lp4);
+        pitch_search_impl(x_lp, y, len, max_pitch, pitch, arch, x_lp4, y_lp4, xcorr);
+    }
+}
+
+/// [`pitch_search`] with the C `VARDECL` scratch (`x_lp4`, `y_lp4`, `xcorr`)
+/// supplied by the caller.
+#[allow(clippy::too_many_arguments)]
+fn pitch_search_impl(
+    x_lp: &[opus_val16],
+    y: &[opus_val16],
+    len: i32,
+    max_pitch: i32,
+    pitch: &mut i32,
+    arch: i32,
+    x_lp4: &mut [opus_val16],
+    y_lp4: &mut [opus_val16],
+    xcorr: &mut [opus_val32],
+) {
     let mut best_pitch: [i32; 2] = [0, 0];
     /* arch is only consumed by the runtime-dispatched celt_pitch_xcorr below;
        the SSE kernels themselves have no arch argument. */
     let _ = arch;
-    celt_assert!(len > 0);
-    celt_assert!(max_pitch > 0);
     let lag = len + max_pitch;
-
-    let mut x_lp4 = vec![0 as opus_val16; (len >> 2) as usize];
-    let mut y_lp4 = vec![0 as opus_val16; (lag >> 2) as usize];
-    let mut xcorr = vec![0 as opus_val32; (max_pitch >> 1) as usize];
 
     /* Downsample by 2 again */
     for j in 0..(len >> 2) as usize {
@@ -279,9 +326,9 @@ pub fn pitch_search(
     /* Coarse search with 4x decimation */
     // celt_pitch_xcorr(..., arch) -> PITCH_XCORR_IMPL[arch & OPUS_ARCHMASK];
     // arch == 4 selects celt_pitch_xcorr_avx2.
-    kernels::celt_pitch_xcorr(&x_lp4, &y_lp4, &mut xcorr, len >> 2, max_pitch >> 2);
+    kernels::celt_pitch_xcorr(x_lp4, y_lp4, xcorr, len >> 2, max_pitch >> 2);
 
-    find_best_pitch(&xcorr, &y_lp4, len >> 2, max_pitch >> 2, &mut best_pitch);
+    find_best_pitch(xcorr, y_lp4, len >> 2, max_pitch >> 2, &mut best_pitch);
 
     /* Finer search with 2x decimation */
     for i in 0..(max_pitch >> 1) as usize {
@@ -292,7 +339,7 @@ pub fn pitch_search(
         let sum = kernels::celt_inner_prod(x_lp, &y[i..], len >> 1);
         xcorr[i] = MAX32(-1., sum);
     }
-    find_best_pitch(&xcorr, y, len >> 1, max_pitch >> 1, &mut best_pitch);
+    find_best_pitch(xcorr, y, len >> 1, max_pitch >> 1, &mut best_pitch);
 
     /* Refine by pseudo-interpolation */
     let offset;
@@ -321,6 +368,12 @@ fn compute_pitch_gain(xy: opus_val32, xx: opus_val32, yy: opus_val32) -> opus_va
 /// `celt/pitch.c:453` `second_check` (static const in C).
 const second_check: [i32; 16] = [0, 0, 3, 2, 3, 2, 5, 2, 3, 2, 3, 2, 5, 2, 3, 2];
 
+/// Capacity of [`remove_doubling`]'s `yy_lookup` scratch.  The caller's
+/// `maxperiod` is halved before use and is at most `COMBFILTER_MAXPERIOD`, and
+/// the table holds `maxperiod/2 + 1` entries (all written before they are
+/// read).
+const REMOVE_DOUBLING_SCRATCH: usize = COMBFILTER_MAXPERIOD as usize / 2 + 1;
+
 /// `celt/pitch.c:454` `remove_doubling`.
 ///
 /// The C does `x += maxperiod` after halving every period argument; the `x`
@@ -335,6 +388,57 @@ pub fn remove_doubling(
     prev_period: i32,
     prev_gain: opus_val16,
     arch: i32,
+) -> opus_val16 {
+    let need = (maxperiod / 2) as usize + 1;
+    if need <= REMOVE_DOUBLING_SCRATCH {
+        /* SAFETY: `opus_val32` is `f32`, so every bit pattern is a valid value,
+           and `remove_doubling_impl` fills `yy_lookup[0..=maxperiod/2]` before
+           reading it.  This is the C `VARDECL`/`ALLOC` scratch, so it must not
+           be zero-initialised. */
+        let mut storage = [MaybeUninit::<opus_val32>::uninit(); REMOVE_DOUBLING_SCRATCH];
+        let yy_lookup = unsafe {
+            core::slice::from_raw_parts_mut(storage.as_mut_ptr() as *mut opus_val32, need)
+        };
+        remove_doubling_impl(
+            x,
+            maxperiod,
+            minperiod,
+            n,
+            t0_,
+            prev_period,
+            prev_gain,
+            arch,
+            yy_lookup,
+        )
+    } else {
+        let mut yy_lookup = vec![0 as opus_val32; need];
+        remove_doubling_impl(
+            x,
+            maxperiod,
+            minperiod,
+            n,
+            t0_,
+            prev_period,
+            prev_gain,
+            arch,
+            &mut yy_lookup,
+        )
+    }
+}
+
+/// [`remove_doubling`] with the C `VARDECL` `yy_lookup` scratch supplied by the
+/// caller.
+#[allow(clippy::too_many_arguments)]
+fn remove_doubling_impl(
+    x: &[opus_val16],
+    maxperiod: i32,
+    minperiod: i32,
+    n: i32,
+    t0_: &mut i32,
+    prev_period: i32,
+    prev_gain: opus_val16,
+    arch: i32,
+    yy_lookup: &mut [opus_val32],
 ) -> opus_val16 {
     let _ = arch;
     let minperiod0 = minperiod;
@@ -351,7 +455,6 @@ pub fn remove_doubling(
 
     let mut t = *t0_;
     let t0 = *t0_;
-    let mut yy_lookup = vec![0 as opus_val32; (maxperiod + 1) as usize];
     let mut xx: opus_val32 = 0.;
     let mut xy: opus_val32 = 0.;
     kernels::dual_inner_prod(

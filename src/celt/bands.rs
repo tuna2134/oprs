@@ -354,8 +354,13 @@ pub fn intensity_stereo(
     N: i32,
 ) {
     let i = bandID;
-    let left: opus_val16 = VSHR32(bandE[i as usize], 0);
-    let right: opus_val16 = VSHR32(bandE[(i + m.nbEBands) as usize], 0);
+    /* `bandE` is `oldEBands` (2*`nbEBands` long) and `bandID < nbEBands`, so
+       both taps are in range; read them unchecked (the C does the same). */
+    debug_assert!(i >= 0 && i < m.nbEBands && bandE.len() >= 2 * m.nbEBands as usize);
+    // SAFETY: see above.
+    let left: opus_val16 = VSHR32(unsafe { *bandE.get_unchecked(i as usize) }, 0);
+    let right: opus_val16 =
+        VSHR32(unsafe { *bandE.get_unchecked((i + m.nbEBands) as usize) }, 0);
     let norm: opus_val16 =
         EPSILON + celt_sqrt(EPSILON + MULT16_16(left, left) + MULT16_16(right, right));
     let a1: opus_val16 = DIV32_16(SHL32(EXTEND32(left), 15), norm);
@@ -712,8 +717,13 @@ unsafe fn compute_theta(
     let ec: *mut ec_ctx = ctx.ec;
     let bandE: &[celt_ener] = ctx.bandE;
 
-    /* Decide on the resolution to give to the split parameter theta */
-    pulse_cap = m.logN[i as usize] as i32 + LM * (1 << BITRES);
+    /* Decide on the resolution to give to the split parameter theta.
+       `i` is a band index below `nbEBands` (`quant_all_bands()` walks
+       `start..end <= nbEBands`), so the `logN` lookup is in range; the
+       unchecked read keeps the per-band call free of the bounds check. */
+    debug_assert!(i >= 0 && i < m.nbEBands);
+    // SAFETY: `i < nbEBands == m.logN.len()` (see above).
+    pulse_cap = unsafe { *m.logN.get_unchecked(i as usize) } as i32 + LM * (1 << BITRES);
     offset = (pulse_cap >> 1)
         - (if stereo != 0 && N == 2 {
             QTHETA_OFFSET_TWOPHASE

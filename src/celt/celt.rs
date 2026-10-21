@@ -430,30 +430,56 @@ fn comb_filter_impl(
      */
     let rem = N - i;
     let base = i; /* `comb_filter_const(y+i, x+i, ...)`: the tail starts at `i` */
-    let mut b: i32 = 0;
-    /* The per-chunk window copy of the C's aliased read (`comb_filter_const`
-       takes `&mut y` and `&x` over the same buffer, which Rust cannot express).
-       The C has no allocation here at all; the size is the C bound
-       `IMIN(12, rem) + T1 + 2 <= 12 + COMBFILTER_MAXPERIOD + 2`, so this is
-       stack storage rather than a fresh `Vec` per chunk. */
-    let mut w_storage = [0.0f32; 12 + COMBFILTER_MAXPERIOD as usize + 2];
-    while b < rem {
-        let m = IMIN(12, rem - b);
-        let wstart = x_off + (base + b) as usize - T1u - 2;
-        let wlen = (m + T1 + 2) as usize;
-        let w = &mut w_storage[..wlen];
-        w.copy_from_slice(&buf[wstart..wstart + wlen]);
-        let ystart = y_off + (base + b) as usize;
+    if x_off + N as usize == y_off {
+        /* `x != y` in C: the caller copied the source into `buf[..h+N]` and the
+           outputs go to the disjoint region `buf[h+N..]`, so the C's single
+           `comb_filter_const(y+i, x+i, T1, N-i, ...)` can be issued as one call
+           over the whole tail.  Its source window
+           `[x_off+base-T1-2, x_off+base+rem) = [.., x_off+N) = [.., y_off)`
+           ends before the first output sample and therefore never observes a
+           written value — exactly the C's read set.  (This is the shape the
+           encoder's `run_prefilter` uses; the chunked path below exists only
+           for the aliased in-place decoder case.) */
+        let wstart = x_off + base as usize - T1u - 2;
+        let wlen = (rem + T1 + 2) as usize;
+        let ystart = y_off + base as usize;
+        debug_assert!(wstart + wlen <= ystart, "comb_filter: tail window overlaps y");
+        let (lo, hi) = buf.split_at_mut(ystart);
         comb_filter_const(
-            &mut buf[ystart..ystart + m as usize],
-            &w,
+            &mut hi[..rem as usize],
+            &lo[wstart..wstart + wlen],
             T1,
-            m,
+            rem,
             g10,
             g11,
             g12,
         );
-        b += m;
+    } else {
+        let mut b: i32 = 0;
+        /* The per-chunk window copy of the C's aliased read (`comb_filter_const`
+           takes `&mut y` and `&x` over the same buffer, which Rust cannot express).
+           The C has no allocation here at all; the size is the C bound
+           `IMIN(12, rem) + T1 + 2 <= 12 + COMBFILTER_MAXPERIOD + 2`, so this is
+           stack storage rather than a fresh `Vec` per chunk. */
+        let mut w_storage = [0.0f32; 12 + COMBFILTER_MAXPERIOD as usize + 2];
+        while b < rem {
+            let m = IMIN(12, rem - b);
+            let wstart = x_off + (base + b) as usize - T1u - 2;
+            let wlen = (m + T1 + 2) as usize;
+            let w = &mut w_storage[..wlen];
+            w.copy_from_slice(&buf[wstart..wstart + wlen]);
+            let ystart = y_off + (base + b) as usize;
+            comb_filter_const(
+                &mut buf[ystart..ystart + m as usize],
+                &w,
+                T1,
+                m,
+                g10,
+                g11,
+                g12,
+            );
+            b += m;
+        }
     }
 }
 
