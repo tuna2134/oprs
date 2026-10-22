@@ -302,7 +302,10 @@ pub fn alg_quant(
     exp_rotation(X, N, 1, B, K, spread);
 
     /* `yy = op_pvq_search(X, iy, K, N, arch);` — the `vq.h:63` macro, which
-       `x86/vq_sse.h:36-37` overrides to `op_pvq_search_sse2`. */
+       `x86/vq_sse.h:36-37` overrides to `op_pvq_search_sse2`.  With
+       `--features fast` that kernel dispatches `K == 1`, `N == 2`, `N == 4` and
+       a scratch-reusing general body to the specialisations in
+       `kernels.rs` (`docs/reports/pvq-specialisations.md`). */
     let yy = kernels::op_pvq_search(X, iy, K, N, arch);
     let collapse_mask = extract_collapse_mask(iy, N, B);
     encode_pulses(iy, N, K, enc);

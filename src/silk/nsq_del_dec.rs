@@ -6,12 +6,47 @@
 //! At arch 4 (this host) that is **`silk_NSQ_del_dec_avx2`**, a Q14 rewrite of
 //! the scalar kernel which is *not* provably identical to the C version: its
 //! `silk_sar_round_smulww` deliberately omits the intermediate int32
-//! truncation of `silk_SMULWW + silk_RSHIFT_ROUND`.  The AVX2 kernel itself
-//! falls back to `silk_NSQ_del_dec_c` when `psEncC->nStatesDelayedDecision` is
-//! 1 or 2 (`verify_assumptions`), and arch 3 selects
-//! `silk_NSQ_del_dec_sse4_1`, which `docs/rtcd-kernels.md` §4.4 proves is a
-//! transcription of the C body (only the short-term prediction is vectorised,
-//! exactly).
+//! truncation of `silk_SMULWW + silk_RSHIFT_ROUND` (§6: "NO, not provably
+//! bit-identical").  The AVX2 kernel itself falls back to
+//! `silk_NSQ_del_dec_c` when `psEncC->nStatesDelayedDecision` is 1 or 2
+//! (`verify_assumptions`), and arch 3 selects `silk_NSQ_del_dec_sse4_1`, which
+//! `docs/rtcd-kernels.md` §4.4 proves is a transcription of the C body (only the
+//! short-term prediction is vectorised, exactly).
+//!
+//! # Which body a build selects
+//!
+//! Every body lives in this file and [`use_avx2_nsq`] is the single policy
+//! function (one line to flip):
+//!
+//! * **both builds**: `arch & OPUS_ARCHMASK == 4` **and** a run-time
+//!   `have_avx2()` select `silk_NSQ_del_dec_avx2` (intrinsics; the lane-vector
+//!   emulation is only its specification and the unit-test surface).  Every
+//!   other case — a CPU without AVX2, an `arch` below 4, and
+//!   `nStatesDelayedDecision` 1/2 inside the AVX2 entry — is the C body.
+//! * **`--features fast`** may add *extra* variants on top (that is what the
+//!   feature is for: speed bought with exactness).  It does **not** own the
+//!   arch-4 kernel: see below.
+//!
+//! ## Why the arch-4 kernel is not a `fast`-only kernel
+//!
+//! The tempting move — default build -> C body ("provably exact"), `fast` ->
+//! AVX2 — was implemented and measured; it is **not** an exactness gain.  The
+//! reference is libopus 1.6.1 *as built and running on this host*, i.e.
+//! `opus_select_arch() == 4`, which dispatches `silk_NSQ_del_dec_avx2`; the C
+//! body is what that library runs only on a host without AVX2 or for
+//! `nStatesDelayedDecision < 3`.  Measurements in `docs/reports/silk-nsq-fast.md`:
+//!
+//! * the 16-configuration oracle changed on **13 of 16** configurations (same
+//!   packet sizes, different bytes) when the default switched to the C body,
+//! * `probe_silkenc` stayed byte-identical in every `deldec_cmp.*_c` field — our
+//!   C body matches the C's `silk_NSQ_del_dec_c` exactly — while the
+//!   `*_dispatched` fields differed on 3 of 14 NSQ cases,
+//! * the AVX2 body is 1.26–1.69x faster per NSQ call than the C body (geomean
+//!   1.48x, min of 300 repetitions), and the lane-vector emulation is 3.6–4.3x
+//!   *slower* than C.
+//!
+//! So the arch-4 dispatch *is* the reference, and the C body is a fallback, not
+//! an exactness gain.
 //!
 //! The `__m128i` vectors of the AVX2 file are modelled as `[i32; 4]` and the
 //! `__m256i` ones as `[i32; 8]`, with each intrinsic transliterated literally
@@ -1021,6 +1056,10 @@ fn mm256_blendv(a: M256, b: M256, mask: M256) -> M256 {
     r
 }
 /// `silk_cvtepi64_epi32_high`
+///
+/// The scalar form of the C helper, kept for parity with the reference file; the
+/// intrinsic body uses its own `h_cvtepi64_epi32_high` (see [`avx2_hw`]).
+#[allow(dead_code)]
 #[inline(always)]
 fn silk_cvtepi64_epi32_high(num: [i64; 4]) -> M128 {
     [
@@ -1540,14 +1579,38 @@ fn silk_nsq_del_dec_scale_states_avx2(
 ///
 /// `is_x86_feature_detected!` caches its answer in a relaxed atomic after the
 /// first `cpuid`, so this is a load, not a re-detection.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 fn have_avx2() -> bool {
+    std::arch::is_x86_feature_detected!("avx2")
+}
+
+/// May `silk_NSQ_del_dec` use [`silk_NSQ_del_dec_avx2`]?  This is the C's
+/// `SILK_NSQ_DEL_DEC_IMPL[(arch) & OPUS_ARCHMASK]` selection, kept in one place
+/// so the *policy* is one line: the arch-4 slot on a host with AVX2 takes the
+/// AVX2 entry, which itself falls back to the bit-exact C body for
+/// `nStatesDelayedDecision` < 3 (`verify_assumptions`); every other case is the
+/// C body.
+///
+/// # Why this is not behind `feature = "fast"`
+///
+/// `docs/reports/silk-nsq-fast.md` measured the alternative (default -> C body,
+/// `fast` -> AVX2).  It is not an exactness gain: libopus at `opus_select_arch()
+/// == 4` — which is what this host builds and runs — *is* the AVX2 kernel, and
+/// switching the default to the C body changes the encoded bitstream of 13 of
+/// the 16 oracle configurations while `probe_silkenc`'s `deldec_cmp.*_c` fields
+/// stay byte-identical (our C body is correct, it is simply not what the
+/// reference does).  So the AVX2 entry stays reachable in every build and only
+/// *additional*, genuinely optional, kernels belong under `fast`.
+#[inline]
+fn use_avx2_nsq(arch: opus_int) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        std::arch::is_x86_feature_detected!("avx2")
+        (arch & 7) == 4 && have_avx2()
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
+        let _ = arch;
         false
     }
 }
@@ -1869,8 +1932,9 @@ fn silk_noise_shape_quantizer_del_dec_avx2_body(
 }
 
 /// `silk_noise_shape_quantizer_del_dec_avx2` (C:633) — dispatcher: the real
-/// AVX2 intrinsics when the host supports them (the same condition the C's
-/// RTCD table tests at start-up), otherwise the lane-vector emulation above.
+/// AVX2 intrinsics when the host supports them (the same condition the C's RTCD
+/// table tests at start-up), otherwise the lane-vector emulation above.  Both
+/// builds behave alike: the intrinsic body is not a `fast`-only kernel.
 #[allow(clippy::too_many_arguments)]
 fn silk_noise_shape_quantizer_del_dec_avx2(
     NSQ: &mut silk_nsq_state,
@@ -2262,9 +2326,19 @@ pub fn silk_NSQ_del_dec_avx2(
 
 /// The dispatched `silk_NSQ_del_dec` (`SILK_NSQ_DEL_DEC_IMPL[(arch) & OPUS_ARCHMASK]`).
 ///
-/// arch 4 -> `silk_NSQ_del_dec_avx2` (with its internal `nStatesDelayedDecision
-/// ∈ {1,2}` fallback to the C body); arch 3 -> `silk_NSQ_del_dec_sse4_1`, which
-/// is the C body; arch 0..2 -> `silk_NSQ_del_dec_c`.
+/// The selection is [`use_avx2_nsq`]:
+///
+/// * arch 4 **with** run-time AVX2 support -> `silk_NSQ_del_dec_avx2`, which
+///   itself falls back to the C body for `nStatesDelayedDecision` ∈ {1,2}
+///   (`verify_assumptions`),
+/// * arch 3 -> `silk_NSQ_del_dec_sse4_1`, which `docs/rtcd-kernels.md` §4.4
+///   proves is a transcription of the C body,
+/// * everything else (arch 0..2, no AVX2, non-x86) -> `silk_NSQ_del_dec_c`.
+///
+/// This is deliberately the same in the default and `fast` builds: arch 4 is
+/// what the reference libopus dispatches on this host, so the C body is the
+/// *fallback*, not an exactness gain.  See the module docs and
+/// `docs/reports/silk-nsq-fast.md`.
 #[allow(clippy::too_many_arguments)]
 pub fn silk_NSQ_del_dec(
     psEncC: &silk_encoder_state,
@@ -2284,7 +2358,7 @@ pub fn silk_NSQ_del_dec(
     LTP_scale_Q14: opus_int,
     arch: opus_int,
 ) {
-    if (arch & 7) == 4 {
+    if use_avx2_nsq(arch) {
         silk_NSQ_del_dec_avx2(
             psEncC,
             NSQ,
@@ -2380,6 +2454,12 @@ pub fn silk_NSQ_del_dec_sse4_1(
 /// `[i32; 8]`) are the storage of `NSQ_del_dec_struct_avx2`, so the intrinsic
 /// code reuses the very same struct through [`ld128`]/[`st128`] bit casts and
 /// both paths stay reachable (and byte-identical) on the same data.
+///
+/// Compiled on x86-64 in every build: the arch-4 dispatch is the reference (see
+/// [`use_avx2_nsq`]), so the intrinsic body is not a `fast`-only kernel.  The
+/// lane-vector emulation above stays as its executable specification: the unit
+/// tests cover its helpers and `examples/nsq_ab.rs` uses it as the reference the
+/// intrinsic path must agree with on the same data.
 #[cfg(target_arch = "x86_64")]
 mod avx2_hw {
     #![allow(unsafe_op_in_unsafe_fn)]

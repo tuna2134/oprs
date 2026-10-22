@@ -1726,6 +1726,8 @@ Extra-library call sites that matter for a full-library bit-exact port:
 | `silk_NSQ_del_dec` (arch 4) | `silk_NSQ_del_dec_avx2` | ENC | **NO, not provably** — `silk_sar_round_smulww` differs from the C `SMULWW+RSHIFT_ROUND` on int32 overflow ("rare cases", per the source comment); plus the whole kernel is a Q14 rewrite (falls back to `silk_NSQ_del_dec_c` when `nStatesDelayedDecision < 3`) |
 | `silk_inner_product_FLP` | `silk_inner_product_FLP_avx2` | ENC | **NO** — FMA + different summation order/reduction tree |
 
+> **Note (what "the reference" means for this table).** The "bit-identical to the plain C version?" column compares a dispatched kernel with the **fallback** body. It is not the contract this crate is held to: the contract is bit-exactness with libopus **as built and configured**, i.e. at `opus_select_arch() == 4` the reference *is* the dispatched implementation. The clearest case is `silk_NSQ_del_dec`: on this host libopus runs `silk_NSQ_del_dec_avx2`, so matching `silk_NSQ_del_dec_c` instead changes 13 of 16 oracle configurations (with identical packet sizes) while every `deldec_cmp.*_c` probe field stays byte-identical — i.e. the C body is a correct *fallback*, not a more exact reference. Measurements and the full argument: `docs/reports/silk-nsq-fast.md`.
+
 ---
 
 ## 7. Direct answers

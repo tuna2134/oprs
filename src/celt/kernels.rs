@@ -2206,6 +2206,15 @@ pub fn op_pvq_search_sse2(x: &[f32], iy: &mut [i32], k: i32, n: i32, _arch: i32)
     let nn = n as usize;
     debug_assert!(x.len() >= nn);
     debug_assert!(iy.len() >= nn + 3);
+    /* `--features fast`: the specialisations of the `[fast]` section below
+       take `K == 1`, `N == 2` and `N == 4`, and otherwise run this body with
+       scratch that is not zero-filled. */
+    #[cfg(all(feature = "fast", target_arch = "x86_64"))]
+    {
+        if let Some(yy) = op_pvq_search_specialised(x, iy, k, nn) {
+            return yy;
+        }
+    }
     // `VARDECL(celt_norm, y/X/signy); ALLOC(..., N+3, ...)` (`celt/x86/
     // vq_sse2.c`) — a real PVQ band is capped at `MAX_PVQ_N` by the mode
     // creator, so the codec path uses stack storage of the C size.  The
@@ -2248,7 +2257,12 @@ pub fn op_pvq_search_sse2(x: &[f32], iy: &mut [i32], k: i32, n: i32, _arch: i32)
        non-x86_64 targets. */
     #[cfg(target_arch = "x86_64")]
     {
-        return op_pvq_search_sse2_hw(xx, y, signy, iy, k, n);
+        /* SAFETY: `xx`/`y`/`signy` each hold `nn + 3` floats and `iy` holds
+           `nn + 3` ints (the C `ALLOC(..., N+3, ...)` contract), and SSE2 is
+           the x86-64 baseline. */
+        return unsafe {
+            op_pvq_search_sse2_hw(xx.as_mut_ptr(), y.as_mut_ptr(), signy.as_mut_ptr(), iy, k, n)
+        };
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -2465,31 +2479,30 @@ fn op_pvq_search_sse2_emu(
 /// "double `y`" convention, the `_mm_max_epi16` tie-break chain and the final
 /// `_mm_xor_si128` sign restore are the same instructions.
 ///
-/// This body is also used by the `fast` build: an `_mm_fmadd_ps` version of the
-/// projection dot products was measured **9-11 % slower** (the loop is a serial
-/// accumulator chain; FMA latency 5 vs add latency 3, and recompiling the whole
-/// kernel under `target_feature(fma)` costs more than the contraction saves), so
-/// `--features fast` deliberately keeps this exact body.
+/// This body is also the `fast` build's general path: an `_mm_fmadd_ps` version
+/// of the projection dot products was measured **9-11 % slower** (the loop is a
+/// serial accumulator chain; FMA latency 5 vs add latency 3, and recompiling
+/// the whole kernel under `target_feature(fma)` costs more than the contraction
+/// saves), so `--features fast` deliberately keeps this exact arithmetic and
+/// only changes the *storage* (see [`op_pvq_search_fast_body`]).
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
-fn op_pvq_search_sse2_hw(
-    xx: &mut [f32],
-    y: &mut [f32],
-    signy: &mut [f32],
+unsafe fn op_pvq_search_sse2_hw(
+    xp: *mut f32,
+    yp: *mut f32,
+    sp: *mut f32,
     iy: &mut [i32],
     k: i32,
     n: i32,
 ) -> f32 {
     use core::arch::x86_64::*;
     let nn = n as usize;
-    /* SAFETY: SSE2 is part of the x86-64 baseline.  `xx`, `y`, `signy` and `iy`
-       are all at least `nn + 3` elements, which is the C `ALLOC(..., N+3, ...)`
-       size; every 4-wide load/store below starts at a `j < nn` that is a
-       multiple of 4 and therefore touches at most indices `nn+2`. */
+    /* SAFETY: SSE2 is part of the x86-64 baseline.  The caller guarantees that
+       `xp`, `yp` and `sp` each point at `nn + 3` writable floats (the C
+       `ALLOC(..., N+3, ...)` size) and that `iy` has `nn + 3` elements; every
+       4-wide load/store below starts at a `j < nn` that is a multiple of 4 and
+       therefore touches at most indices `nn+2`. */
     unsafe {
-        let xp = xx.as_mut_ptr();
-        let yp = y.as_mut_ptr();
-        let sp = signy.as_mut_ptr();
         let ip = iy.as_mut_ptr();
         /* All bits set to zero, except for the sign bit. */
         let signmask = _mm_set_ps1(-0.0);
@@ -2773,6 +2786,288 @@ pub fn op_pvq_search_c(x: &mut [f32], iy: &mut [i32], k: i32, n: i32) -> f32 {
         j += 1;
     }
     yy
+}
+
+// ---------------------------------------------------------------------------
+// [fast] PVQ search specialisations
+//
+// The dispatch shape follows `restsend/opus-rs` `src/pvq.rs:100-147`
+// (`pvq_search`): `K == 1` is an argmax, `N == 2` uses the exact reciprocal,
+// `N == 4` has a dedicated four-lane body, and everything else runs through a
+// specialised kernel.  `N == 2` (closed form, exact reciprocal) and `K == 1`
+// (argmax, see its doc comment for the tie-break difference) move the
+// bitstream; the `N == 4` and general bodies keep the reference score
+// function, the `_mm_rcp_ps` / `_mm_rsqrt_ps` approximations and the
+// tie-break, so they are bit-identical to [`op_pvq_search_sse2`] (verified by
+// a 2912-case equivalence sweep against the reference body).
+//
+// The general body's win is *not* a wider vector: the reference's
+// `VARDECL(celt_norm, X/y/signy)` are three `[0.0; MAX_PVQ_N + 3]` arrays, and
+// zero-filling 3 x 4.3 KiB of scratch on every call costs more than a small
+// band's search (the C uses an uninitialised `alloca`).  [`op_pvq_search_fast_body`]
+// keeps the four-lane reference arithmetic but writes only the lanes it reads.
+// An eight-lane AVX2 scan was implemented, measured and reverted: the per-pulse
+// cost is dominated by the serial `xy`/`yy` update, the horizontal argmax and
+// the scalar `y[best] += 2` store, so halving the loop count did not pay (see
+// `docs/reports/pvq-specialisations.md`).
+// ---------------------------------------------------------------------------
+
+/// `[fast]` `K == 1`: a single unit pulse on the largest magnitude.
+///
+/// For `K == 1` the reference body's whole greedy loop is a single pass with
+/// `xy == 0` and `yy == 1`, so every lane scores exactly `|x|` and the pulse
+/// goes to a maximum-magnitude coefficient.  Its tie-break, however, is an
+/// artefact of the `_mm_max_epi16` bookkeeping: `pos` is only raised on a
+/// *strict* improvement over the running per-lane maximum, so among equal
+/// magnitudes the winner is the largest index of the earliest four-lane group
+/// that reached the maximum, not the largest index overall (measured:
+/// `|x|` all equal, `n = 39` -> reference index 3, this body index 38).
+///
+/// This body is the plain argmax (largest index among equal magnitudes,
+/// index 0 when all are zero), which is the same *choice of coefficient* the
+/// reference is reaching for and is what `restsend/opus-rs` does
+/// (`pvq_search`, `k == 1`).  It is therefore not bit-identical on ties; the
+/// measured cost is a different (equally scoring) pulse position, zero size
+/// drift and a `0.00 dB` signal-SNR delta (`docs/reports/pvq-specialisations.md`).
+///
+/// # Slice lengths
+/// `x.len() >= n`, `iy.len() >= n + 3` (same contract as
+/// [`op_pvq_search_sse2`]).
+///
+/// Returns `yy = <iy,iy> = 1`.
+#[cfg(all(feature = "fast", target_arch = "x86_64"))]
+fn op_pvq_search_k1(x: &[f32], iy: &mut [i32], n: usize) -> f32 {
+    debug_assert!(n > 0 && x.len() >= n && iy.len() >= n + 3);
+    let mut best = 0usize;
+    let mut best_abs = 0.0f32;
+    let mut j = n;
+    while j > 0 {
+        j -= 1;
+        let a = x[j].abs();
+        if a > best_abs {
+            best_abs = a;
+            best = j;
+        }
+    }
+    iy[..n].fill(0);
+    iy[best] = if x[best] < 0.0 { -1 } else { 1 };
+    1.0
+}
+
+/// `[fast]` `N == 2`: closed-form split with an exact `1.0 / sum` reciprocal
+/// instead of the reference's `_mm_rcp_ps` approximation.
+///
+/// With two dimensions the PVQ optimum is `y ∝ |X|`, so rounding `y0` to the
+/// nearest integer and giving `K - y0` to `y1` is the best integer split; the
+/// reference instead projects, truncates and then runs the greedy loop.  The
+/// pulse vector therefore differs, but both are valid codewords
+/// (`|y|_1 == K`).
+///
+/// Returns `yy = <iy,iy>`.
+#[cfg(all(feature = "fast", target_arch = "x86_64"))]
+fn op_pvq_search_n2(x: &[f32], iy: &mut [i32], k: i32) -> f32 {
+    debug_assert!(k > 0 && x.len() >= 2 && iy.len() >= 5);
+    let a0 = x[0].abs();
+    let a1 = x[1].abs();
+    let sum = a0 + a1;
+    if !(sum > EPSILON) {
+        /* All-zero (or NaN) input: the reference's "pulse at 0" rule. */
+        iy[0] = k;
+        iy[1] = 0;
+        return (k as f32) * (k as f32);
+    }
+    let rcp = 1.0f32 / sum;
+    let kf = k as f32;
+    let y0 = ((kf * a0 * rcp + 0.5).floor() as i32).clamp(0, k);
+    let y1 = k - y0;
+    iy[0] = if x[0] < 0.0 { -y0 } else { y0 };
+    iy[1] = if x[1] < 0.0 { -y1 } else { y1 };
+    (y0 * y0 + y1 * y1) as f32
+}
+
+/// `[fast]` `N == 4`: the whole search on one `__m128`, with the four-lane
+/// argmax recovered by `_mm_movemask_ps` instead of the reference's
+/// `_mm_max_epi16` position vector.
+///
+/// The score function, the pre-search (including `_mm_rcp_ps`), the reduction
+/// order and the "largest index among the lanes equal to the maximum"
+/// tie-break are the reference's, so the result is bit-identical to
+/// [`op_pvq_search_sse2`]; the win is dropping the `N + 3` scratch buffers and
+/// the per-pulse index bookkeeping.
+///
+/// # Slice lengths
+/// `x.len() >= 4`, `iy.len() >= 7` (the four-lane `iy` store writes `iy[0..4]`).
+///
+/// Returns `yy = <iy,iy>`.
+#[cfg(all(feature = "fast", target_arch = "x86_64"))]
+#[target_feature(enable = "sse2")]
+unsafe fn op_pvq_search_n4_hw(x: &[f32], iy: &mut [i32], k: i32) -> f32 {
+    use core::arch::x86_64::*;
+    /* SAFETY: SSE2 is the x86-64 baseline; the caller guarantees the slice
+       lengths (`x.len() >= 4`, `iy.len() >= 7`). */
+    unsafe {
+        let signmask = _mm_set_ps1(-0.0);
+        let zero = _mm_setzero_ps();
+        let vx = _mm_loadu_ps(x.as_ptr());
+        let sign4 = _mm_cmplt_ps(vx, zero);
+        let mut xv = _mm_andnot_ps(signmask, vx);
+        let mut xabs = [0.0f32; 4];
+        let mut y2f = [0.0f32; 4];
+        let mut iys = [0i32; 4];
+        let mut xy = 0.0f32;
+        let mut yy = 0.0f32;
+        let mut pulses_left = k;
+
+        if k > 2 {
+            /* `sums`, with the reference's two-shuffle reduction. */
+            let mut sums = _mm_add_ps(xv, _mm_shuffle_ps::<0x4e>(xv, xv));
+            sums = _mm_add_ps(sums, _mm_shuffle_ps::<0xb1>(sums, sums));
+            let sum = _mm_cvtss_f32(sums);
+            if !(sum > EPSILON && sum < 64.0) {
+                xv = _mm_set_ps(0.0, 0.0, 0.0, QCONST16(1.0, 14));
+                sums = _mm_set1_ps(1.0);
+            }
+            let rcp4 = _mm_mul_ps(_mm_set1_ps((k as f64 + 0.8) as f32), _mm_rcp_ps(sums));
+            let rx4 = _mm_mul_ps(xv, rcp4);
+            let iy4 = _mm_cvttps_epi32(rx4);
+            let y4 = _mm_cvtepi32_ps(iy4);
+            _mm_storeu_si128(iys.as_mut_ptr() as *mut __m128i, iy4);
+            let xy4 = _mm_mul_ps(xv, y4);
+            let yy4 = _mm_mul_ps(y4, y4);
+            let mut t = _mm_add_ps(xy4, _mm_shuffle_ps::<0x4e>(xy4, xy4));
+            t = _mm_add_ps(t, _mm_shuffle_ps::<0xb1>(t, t));
+            xy = _mm_cvtss_f32(t);
+            let mut t = _mm_add_ps(yy4, _mm_shuffle_ps::<0x4e>(yy4, yy4));
+            t = _mm_add_ps(t, _mm_shuffle_ps::<0xb1>(t, t));
+            yy = _mm_cvtss_f32(t);
+            let mut t = _mm_add_epi32(iy4, _mm_shuffle_epi32::<0x4e>(iy4));
+            t = _mm_add_epi32(t, _mm_shuffle_epi32::<0xb1>(t));
+            pulses_left -= _mm_cvtsi128_si32(t);
+            _mm_storeu_ps(y2f.as_mut_ptr(), _mm_add_ps(y4, y4));
+        }
+        _mm_storeu_ps(xabs.as_mut_ptr(), xv);
+        celt_sig_assert!(pulses_left >= 0);
+
+        /* This should never happen, but just in case it does (e.g. on
+           silence) we fill the first bin with pulses. */
+        if pulses_left > 7 {
+            let tmp = pulses_left as f32;
+            yy = MAC16_16(yy, tmp, tmp);
+            yy = MAC16_16(yy, tmp, y2f[0]);
+            iys[0] += pulses_left;
+            pulses_left = 0;
+        }
+
+        let xq = _mm_loadu_ps(xabs.as_ptr());
+        let mut i = 0i32;
+        while i < pulses_left {
+            /* The squared magnitude term gets added anyway, so we might as
+               well add it outside the loop. */
+            yy = ADD16(yy, 1.0);
+            let rxy = _mm_add_ps(xq, _mm_set1_ps(xy));
+            let ryy = _mm_add_ps(_mm_loadu_ps(y2f.as_ptr()), _mm_set1_ps(yy));
+            let score = _mm_mul_ps(rxy, _mm_rsqrt_ps(ryy));
+            /* Horizontal max; then every lane equal to it is a candidate and
+               the largest index wins, exactly like the reference. */
+            let mut m = _mm_max_ps(score, _mm_shuffle_ps::<0x4e>(score, score));
+            m = _mm_max_ps(m, _mm_shuffle_ps::<0xb1>(m, m));
+            let mask = _mm_movemask_ps(_mm_cmpeq_ps(score, m)) as u32;
+            let best = (31 - mask.leading_zeros()) as usize;
+            xy = ADD32(xy, xabs[best]);
+            yy = ADD16(yy, y2f[best]);
+            y2f[best] += 2.0;
+            iys[best] += 1;
+            i += 1;
+        }
+
+        /* Put the original sign back: `iy = (iy ^ sign) + sign` with
+           `sign = -1` for a negative input. */
+        /* `s4` is the `_mm_cmplt_ps` mask (-1 for a negative input), so the
+           reference's `(y ^ s) + s` on the integer `signx` becomes
+           `(y + s) ^ s` here. */
+        let signs = _mm_movemask_ps(sign4) as u32;
+        let mut j = 0usize;
+        while j < 4 {
+            let s = -(((signs >> j) & 1) as i32);
+            iy[j] = (iys[j].wrapping_add(s)) ^ s;
+            j += 1;
+        }
+        yy
+    }
+}
+
+/// `[fast]` general-body specialisation: the reference
+/// [`op_pvq_search_sse2_hw`] arithmetic on scratch that is *written before it
+/// is read* instead of being zero-filled.
+///
+/// The reference wrapper allocates three `[0.0f32; MAX_PVQ_N + 3]` arrays
+/// (4.3 KiB) per call; for a small band the zero-fill is a large share of the
+/// call.  The C `ALLOC` is an `alloca`, which does not initialise, so this body
+/// reproduces that layout: `X[0..N]` is copied in, `X[N..N+3]` is zeroed (the
+/// reference's `X[N] = X[N+1] = X[N+2] = 0`), and `y`/`signy` are left
+/// uninitialised because the first four-lane pass writes every lane the kernel
+/// later reads (`y[N..N+3] = 100` is written by the reference body itself).
+///
+/// The pulse vector and `yy` are bit-identical to [`op_pvq_search_sse2`].
+///
+/// # Slice lengths
+/// `x.len() >= n`, `iy.len() >= n + 3`.
+#[cfg(all(feature = "fast", target_arch = "x86_64"))]
+fn op_pvq_search_fast_body(x: &[f32], iy: &mut [i32], k: i32, n: usize) -> f32 {
+    use core::mem::MaybeUninit;
+    let nn = n;
+    let mut xx_storage = [MaybeUninit::<f32>::uninit(); MAX_PVQ_N + 3];
+    let mut y_storage = [MaybeUninit::<f32>::uninit(); MAX_PVQ_N + 3];
+    let mut signy_storage = [MaybeUninit::<f32>::uninit(); MAX_PVQ_N + 3];
+    let mut xx_heap: Vec<f32> = Vec::new();
+    let mut y_heap: Vec<f32> = Vec::new();
+    let mut signy_heap: Vec<f32> = Vec::new();
+    let (xp, yp, sp): (*mut f32, *mut f32, *mut f32) = if nn + 3 <= MAX_PVQ_N + 3 {
+        (
+            xx_storage.as_mut_ptr().cast::<f32>(),
+            y_storage.as_mut_ptr().cast::<f32>(),
+            signy_storage.as_mut_ptr().cast::<f32>(),
+        )
+    } else {
+        /* The `kernels` probe's unreachable sizes. */
+        xx_heap.resize(nn + 3, 0.0);
+        y_heap.resize(nn + 3, 0.0);
+        signy_heap.resize(nn + 3, 0.0);
+        (
+            xx_heap.as_mut_ptr(),
+            y_heap.as_mut_ptr(),
+            signy_heap.as_mut_ptr(),
+        )
+    };
+    /* SAFETY: each pointer has `nn + 3` writable floats.  `x.len() >= nn`
+       (asserted by `op_pvq_search_sse2`), so the copy stays in bounds; the
+       three tail lanes are the reference's `X[N..N+3] = 0`; `y` and `signy`
+       are written by the kernel's first pass before any read. */
+    unsafe {
+        core::ptr::copy_nonoverlapping(x.as_ptr(), xp, nn);
+        core::ptr::write_bytes(xp.add(nn), 0, 3);
+        op_pvq_search_sse2_hw(xp, yp, sp, iy, k, nn as i32)
+    }
+}
+
+/// Dispatcher for the `[fast]` PVQ specialisations.  Returns `None` when the
+/// reference [`op_pvq_search_sse2`] body should run instead.
+#[cfg(all(feature = "fast", target_arch = "x86_64"))]
+#[inline]
+fn op_pvq_search_specialised(x: &[f32], iy: &mut [i32], k: i32, n: usize) -> Option<f32> {
+    /* `K == 1` first: it also covers `N == 2`, and the argmax is the whole
+       search. */
+    if k == 1 {
+        return Some(op_pvq_search_k1(x, iy, n));
+    }
+    if n == 2 {
+        return Some(op_pvq_search_n2(x, iy, k));
+    }
+    if n == 4 {
+        /* SAFETY: the caller checks `iy.len() >= n + 3`. */
+        return Some(unsafe { op_pvq_search_n4_hw(x, iy, k) });
+    }
+    Some(op_pvq_search_fast_body(x, iy, k, n))
 }
 
 /// `op_pvq_search` as used by the port.  In the reference configuration
