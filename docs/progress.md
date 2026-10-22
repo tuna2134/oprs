@@ -884,3 +884,249 @@ check) is what the study measured.
 decode `48k/2ch/20ms/audio` **1.07–1.08** (1.130) · `8k/mono/20ms/voip` **1.16–1.20** (1.171).
 All numbers are same-session base→change pairs; the host's audiopus control column moved up to ±15 %
 between runs, so only the ratio and the paired oprs/audiopus deltas were used.
+
+## SIMD removal — every kernel in `src/celt/kernels.rs` is plain Rust
+
+Scope: `src/celt/kernels.rs` only (plus this section).  The file now contains **zero**
+`core::arch`/`std::arch` imports, `_mm_*`/`_mm256_*` calls, `#[target_feature]` attributes,
+`is_x86_feature_detected!` uses and `#[cfg(target_arch = ...)]` splits (56 intrinsic call sites,
+3 `#[target_feature]`, 25 `cfg(target_arch)` blocks, 20 `cfg_attr(target_arch)`, 8 `use core::arch`
+removed).  Each kernel is one unconditionally compiled plain-Rust body that reproduces the
+arithmetic of the C `arch == 4` kernel operation for operation, so it builds and gives identical
+output on x86-64, aarch64 and any other target.
+
+### Per-kernel inventory
+
+| kernel (C) | before | after |
+| --- | --- | --- |
+| `xcorr_kernel` (`x86/pitch_sse.c:43`) | SSE intrinsics on x86_64, `[f32;4]` emulation elsewhere | lane body: two `[f32;4]` accumulators, `shuffle_ps` lane select, folded once |
+| `celt_inner_prod` (`x86/pitch_sse.c:108`) | `celt_inner_prod_sse_hw` intrinsics + emulation | lane body, reduction kept as `(s0+s2)+(s1+s3)`, `MAC16_16` tail |
+| `dual_inner_prod` (`x86/pitch_sse.c:79`) | `dual_inner_prod_sse_hw` intrinsics + emulation | lane body, two accumulators reduced before the scalar tail |
+| `comb_filter_const` (`x86/pitch_sse.c:133`) | SSE intrinsics + emulation | lane body, `(g11·(x3+x1))+(g12·(x4+x0))` partial sums + `CUSTOM_MODES` scalar tail |
+| `xcorr_kernel_avx` (`x86/pitch_avx.c:39`) | AVX2+FMA intrinsics + `f32::mul_add` fallback | the 8-lane `f32::mul_add` body (single rounding = `vfmadd`), same `permute2f128`/`hadd` tree |
+| `celt_pitch_xcorr` (`x86/pitch_avx.c:86`) | AVX2 dispatch + `#[target_feature]` wrapper | the 8-lag body directly, no dispatch |
+| `op_pvq_search_sse2` (`x86/vq_sse2.c:44`) | SSE2 intrinsics incl. `_mm_rcp_ps`/`_mm_rsqrt_ps` + lane emulation | lane body with the `RCP_TAB`/`RSQRT_TAB` software models |
+| `simd_rcp_ps_v4` / `simd_rsqrt_ps_v4` | hardware instruction on x86_64 | the software model per lane (the model was already proved bit-identical over 8M inputs) |
+| `have_avx2_fma()` | `is_x86_feature_detected!("avx2") && …("fma")` | `false` stub — kept only because `silk/float/inner_product_flp.rs` (out of scope) calls it |
+| `celt_fir`, `xcorr_kernel_c`, `celt_inner_prod_c`, `dual_inner_prod_c`, `comb_filter_const_c`, `celt_pitch_xcorr_c`, `op_pvq_search_c` | already plain Rust | unchanged |
+
+### Gates after the change (all green)
+
+```
+$ cargo build --release
+warning: `oprs` (lib) generated 57 warnings      # the same pre-existing set, unchanged
+probe_kernels: IDENTICAL (2816 lines)
+probe_vq: IDENTICAL (2773 lines)
+probe_pitch: IDENTICAL (1397 lines)
+probe_celt: IDENTICAL (5023 lines)
+probe_celt_encoder: IDENTICAL (1224 lines)
+probe_celt_decoder: IDENTICAL (764 lines)
+all 25 probes are bit-exact
+ACCEPTANCE: BIT-EXACT — every configuration produced identical packets and identical decoded PCM.
+test result: ok. 315 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+$ cargo build                                  # debug, debug_assert! live: OK
+```
+Oracle totals identical on both sides: `TOTAL enc=0xdbce15d74e829a43 dec=0xf73254ad00d572f1`.
+
+### Cost — controlled same-session pairs (accepted)
+
+Four `compat/bench` runs on this host in one session, alternating before/after
+(`BENCH_FILTER=enc_i16` / `dec_i16`); the ratio column is oprs/audiopus ns/op, so the host's own
+±15 % drift cancels.  Identical-tree noise floor measured on the before side: rows within ±6.5 %,
+geomean 1.248 vs 1.263 (+1.2 %); on the after side rows within ±3.5 %, geomean 2.264 vs 2.274.
+
+```
+row (r_min)                          pair 1 (before -> after)   pair 2 (before -> after)
+8k/mono/20ms/lowdelay                1.283 -> 5.198  +305%      1.366 -> 5.026  +268%
+8k/mono/10ms/lowdelay                1.398 -> 4.453  +219%      1.326 -> 4.413  +233%
+12k/mono/20ms/audio                  1.270 -> 4.562  +259%      1.293 -> 4.688  +263%
+48k/mono/20ms/lowdelay               1.098 -> 2.958  +169%      1.105 -> 2.974  +169%
+48k/2ch/20ms/audio                   1.086 -> 2.054   +89%      1.077 -> 2.127   +97%
+48k/mono/20ms/audio                  1.103 -> 2.884  +161%      1.159 -> 2.846  +146%
+whole enc_i16 set (geomean)          1.248 -> 2.264   +81%      1.263 -> 2.274   +80%
+48k/2ch/20ms/audio/128000bps/fec=0   1.057 -> 1.070    +1%      1.049 -> 1.054    +0%
+8k/mono/20ms/voip/16000bps/fec=0     1.152 -> 1.146    -1%      1.159 -> 1.144    -1%
+whole dec_i16 set (geomean)          1.221 -> 1.233    +1%      1.223 -> 1.236    +1%
+```
+This is the full revert: the encode geomean 2.26 and the worst row 5.03–5.20 reproduce the
+pre-SIMD figures recorded above ("encode residual ~2.3–2.6x", worst `8k/mono/20ms/lowdelay` 5.19),
+i.e. the pitch-xcorr AVX2 win (~90 µs/frame), the SSE2 reductions and the hardware
+`rcp`/`rsqrt` are all given back.  Decode is neutral (+1 %), as expected: the PVQ search is
+encoder-only and `comb_filter_const` is unreachable on real packets.
+
+`examples/bench_min.rs` (x realtime, single run per side, this host's row noise is ±15 %):
+
+```
+row                          encode before -> after      decode before -> after
+48k/stereo/audio/96k/20ms    74.4/70.2 -> 42.1/41.3       278.2/257.3 -> 252.5/245.1
+48k/mono/voip/32k/20ms      133.0/149.4 -> 55.7/57.5      571.2/533.8 -> 537.6/469.0
+48k/stereo/ld/64k/2.5ms      76.4/64.3  -> 70.2/57.6      185.8/189.4 -> 165.2/186.2
+16k/mono/voip/16k/20ms       79.7/78.7  -> 68.6/67.6     1976.7/2286.0 -> 2237.1/2196.6
+8k/mono/voip/12k/20ms       168.9/164.9 -> 150.9/150.4   4312.6/4073.5 -> 4679.8/4060.3
+```
+i.e. encode −41…−62 % on the CELT-heavy rows, −8…−14 % on the others; decode −12…0 % on the
+48 kHz rows and inside the noise floor (±13 %) on the 16/8 kHz rows, whose frames are 0.00–0.01 ms.
+
+One part of the SILK-row encode loss is *not* the CELT kernels: `have_avx2_fma()` is now `false`,
+so `silk/float/inner_product_flp.rs` always takes its portable `f64::mul_add` body (same bits, but
+`fma` is a libcall instead of `vfmadd`).  Forcing the stub to `true` on this AVX2 host and re-running
+`bench_min` moves `8k/mono/voip/12k` 150.9 → 169.3 (+12 %), `16k/mono/voip/16k` 68.6 → 82.8
+(+21 %) and `48k/mono/voip/32k` 55.7 → 59.0 (+6 %), while the CELT-only rows do not move
+(42.1 → 42.5, 70.2 → 68.7).  Removing that residual would require touching the silk file.
+
+### Files that still contain intrinsics (not touched, for the orchestrator)
+
+* `src/silk/nsq_del_dec.rs` — `mod avx2_hw` (`silk_NSQ_del_dec_avx2`): **83** `_mm_*`/`_mm256_*`
+  call sites, **22** `#[target_feature(enable = "avx2")]` functions, 20 `unsafe fn`, plus
+  `have_avx2()` → `is_x86_feature_detected!("avx2")` and the matching dispatchers.  The largest
+  remaining SIMD block in the crate.
+* `src/celt/arch.rs` — `float2int()`: 2 intrinsics
+  (`core::arch::x86_64::_mm_cvtss_si32(_mm_set_ss(x))`) under `#[cfg(target_arch = "x86_64")]`,
+  with a `round_ties_even()` fallback; it is a `cvtss2si` rounding-mode dependency (~5 % of a
+  decode frame per the earlier note).
+* `src/silk/float/inner_product_flp.rs` — no `_mm_*` calls, but 1
+  `#[target_feature(enable = "avx2,fma")]` wrapper (`silk_inner_product_FLP_avx2_hw`) reached via
+  `kernels::have_avx2_fma()`, which now always returns `false`.
+
+## Opt-in `fast` build (AVX2+FMA operation reordering)
+
+The bit-exactness contract is kept as the default.  `Cargo.toml` gains one
+non-default feature:
+
+```toml
+[features]
+fast = []
+```
+
+* **Default build** (`cargo build --release`): unchanged.  Every bit-exact body is
+  untouched; the acceptance suite is still `ACCEPTANCE SUITE: all gates passed.`
+  (25 probes bit-exact, 16-configuration oracle `BIT-EXACT`, 315 tests).
+* **`--features fast`**: compile-time `cfg(feature = "fast")` selects extra
+  AVX2+FMA kernels.  Each is *also* guarded by the existing run-time
+  `have_avx2_fma()` check, so a CPU without FMA executes the bit-exact body
+  instead of SIGILL.  Nothing outside `src/celt/kernels.rs`,
+  `src/celt/bands.rs`, `Cargo.toml` (`[features]` only) and `examples/` changed.
+
+The fast variants change only the floating-point *operation order*: 8 lanes
+instead of 4, FMA contraction instead of `mul`+`add`, and multiple accumulator
+chains.  They are not bit-identical to libopus; see the quality section below.
+
+### What is selected
+
+| kernel | default (bit-exact) | `fast` variant (threshold) | kernel A/B, ns/call |
+| --- | --- | --- | --- |
+| `celt_inner_prod` | 4-lane SSE, one accumulator, `(s0+s2)+(s1+s3)` | 4 × 8-lane FMA chains, 32 samples/iter, `n >= 32` | n=960 **222–226 → 80** (2.8×), n=480 **109–110 → 50** (2.2×), n=176 **37–41 → 33** (1.15×), n=64 **13.5 → 8.7** (1.5×) |
+| `dual_inner_prod` | 2 × 4-lane SSE accumulators | 2 chains per product (4 chains), `n >= 32` | n=960 **234–240 → 146** (1.6×), n=480 **119–122 → 92** (1.3×) |
+| `xcorr_kernel` | 2 × 4-lane SSE accumulators | 4 lags × one 8-lane FMA chain, `len >= 24` | len=24 **16.2–16.4 → 14.0–14.5** (1.15×) |
+| `celt_pitch_xcorr` | already AVX2+FMA 8-lag (C parity) | same 8-lag kernel, called directly (skips the per-8-lag `have_avx2_fma()` dispatch) | len=120/180 lags **3020–3073 → 2731–2795** (1.10×) |
+| `compute_band_energies` | per band: `celt_inner_prod` | fused per-band 2 × 8-lane FMA chains, scalar `N mod 8` tail | covered by the end-to-end rows |
+| `comb_filter_const` | SSE `mul`+`add`, partial sums | **none — reverted**, see below | — |
+| `op_pvq_search_sse2` | SSE2, hardware `rcp`/`rsqrt` | **none — reverted**, see below | — |
+
+The small-size thresholds matter: a single-chain or 8-lane reduction is *slower*
+than SSE below them (measured `celt_inner_prod` n=8 4.7 → 6.5 ns, n=16
+5.9 → 6.5 ns; `xcorr_kernel` len=8 7.3 → 11.0 ns), so those sizes keep the
+bit-exact body even under `fast`.
+
+`examples/kernel_ab.rs` is the per-kernel harness (same source built with and
+without `fast`, alternating passes).  `examples/snr_harness.rs` is the quality
+gate.
+
+### Reverted after measurement
+
+* **`comb_filter_const` FMA**: implemented (`fma(g10,x2,yi)` →
+  `fma(g11,x3+x1,·)` → `fma(g12,x4+x0,·)`); the kernel is load/shuffle-bound and
+  the out-of-line `#[target_feature]` call costs more than the three fused
+  multiply-adds save: **460 → 475 ns/call at N=960 (+3 %)** across repeated
+  passes.  Reverted; the exact SSE body stays.
+* **`op_pvq_search_sse2` FMA** (only the projection dot products `xy4`/`yy4`
+  are contractible; `rcp`/`rsqrt` stay hardware approximations as required):
+  **N=32,K=20 368 → 408 ns (+11 %)**, **N=64,K=48 1017 → 1113 ns (+9 %)**,
+  with or without a second accumulator chain.  The projection loop is a serial
+  accumulator chain (FMA latency 5 vs add latency 3) and recompiling the whole
+  kernel under `target_feature(fma)` did not pay off.  Reverted.
+* **PVQ specialisations** (`k==1` argmax, `n==2` exact reciprocal, `n==4`,
+  `n>=32` fast-select, `k>4` AVX2 search) were *not* attempted: they change the
+  bitstream and need their own quality study, and the requested kernels were
+  the scope here.
+
+### End-to-end A/B (same session, three alternating pairs)
+
+`compat/bench` built twice (`cargo build --release` vs
+`--features oprs/fast`), run `exact fast exact fast exact fast` with
+`BENCH_FILTER=enc_i16 BENCH_TARGET_MS=60`.  The ratio is oprs/libopus ns per
+frame *inside the same process*, so the host's drift cancels.  Noise floor
+(spread of the three exact runs per row): 0.9–8.1 %.
+
+```
+row                                   r_med exact -> fast          r_min change
+8k/mono/10ms/lowdelay                 1.393 -> 1.300  (-6.7 %)     -7.3 %
+8k/mono/20ms/lowdelay                 1.276 -> 1.248  (-2.2 %)     -3.4 %
+12k/mono/20ms/audio                   1.261 -> 1.235  (-2.1 %)     -5.7 %
+48k/mono/20ms/lowdelay                1.146 -> 1.098  (-4.2 %)     -3.8 %
+48k/2ch/20ms/audio                    1.076 -> 1.101  (+2.4 %)     -1.0 %
+48k/mono/20ms/audio                   1.122 -> 1.094  (-2.5 %)     -0.6 %
+geomean over the six rows             1.208 -> 1.176  (-2.6 %)
+```
+
+So the listed kernels buy a consistent ~2–3 % end-to-end encode reduction
+(the 8 kHz CELT-only rows 2–7 %, within/near the host noise), not C parity.
+`examples/bench_min.rs` agrees: the CELT-heavy 48k/stereo/audio row moves
+70–75× → 73–75× realtime and the SILK-heavy rows stay inside the harness's own
+±7 % noise floor.
+
+### Quality gate (the fast build is not bit-exact)
+
+`examples/snr_harness.rs` links the system libopus 1.6.1 (`#[link(name =
+"opus")]`, no Rust dependencies), runs all 16 oracle configurations with the C
+oracle's deterministic signal and loss/FEC pattern, and compares decoded float
+PCM in both directions:
+
+* `dec(our packets)`: oprs decode vs libopus decode of **our** packets,
+* `dec(C packets)`: oprs decode vs libopus decode of **libopus's** packets,
+* `enc drift`: libopus decode of our packets vs libopus decode of libopus's
+  packets (informational),
+* packet-size drift per configuration.
+
+`fast` result: **minimum decoder SNR 129.1 dB** (gate 90 dB); CELT-decoding rows
+129.1–166.8 dB, SILK-only rows bit-identical (`inf`).  Interop holds in both
+directions (libopus decodes every packet we emit; we decode every libopus
+packet).  Packet bytes are **95104 vs 95104** with **0 frames of different
+size**, and `enc drift` is `inf` on all 16 rows: on this corpus the reordered
+encoder still emits the *same bitstream* — only the decoder's PCM differs, at
+≥129 dB.
+
+```
+oprs quality harness — build: fast (AVX2+FMA-contracted kernels)
+...
+minimum decoder SNR: 129.1 dB
+QUALITY: PASS (minimum decoder SNR 129.1 dB >= 90.0 dB, interop both directions)
+```
+
+Run it under the default build and every row is `inf` with 0 packet-size drift,
+which is the harness's own sanity check.  (It also reproduces bit-identical
+packets, i.e. the default build is still bit-exact.)
+
+### Gate lines
+
+Default build, `bash compat/scripts/run-acceptance.sh`:
+
+```
+test result: ok. 315 passed; 0 failed; ...
+probe_*: IDENTICAL  (25 probes)
+DECODE HALF: BIT-EXACT — ... all 16 acceptance configurations.
+ACCEPTANCE: BIT-EXACT — every configuration produced identical packets and identical decoded PCM.
+ACCEPTANCE SUITE: all gates passed.
+```
+
+Fast build:
+
+```
+$ cargo build --release --features fast
+    Finished `release` profile [optimized] ...
+$ cargo test --lib --release --features fast
+test result: ok. 315 passed; 0 failed; ...
+$ ./target/release/examples/snr_harness
+minimum decoder SNR: 129.1 dB
+QUALITY: PASS (minimum decoder SNR 129.1 dB >= 90.0 dB, interop both directions)
+```

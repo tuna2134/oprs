@@ -138,8 +138,66 @@ pub fn hysteresis_decision(
     i
 }
 
+#[cfg(all(feature = "fast", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn compute_band_energies_avx2(
+    m: &CELTMode,
+    X: &[celt_sig],
+    bandE: &mut [celt_ener],
+    end: i32,
+    C: i32,
+    LM: i32,
+) {
+    use core::arch::x86_64::*;
+    let eBands = &m.eBands;
+    let N: i32 = m.shortMdctSize << LM;
+    unsafe {
+        for c in 0..C {
+            for i in 0..end {
+                let off: i32 = c * N + ((eBands[i as usize] as i32) << LM);
+                let len: i32 =
+                    ((eBands[i as usize + 1] as i32) - (eBands[i as usize] as i32)) << LM;
+                let base = off as usize;
+                let mut s = [_mm256_setzero_ps(); 2];
+                let mut j: i32 = 0;
+                while j < len - 15 {
+                    let x0 = _mm256_loadu_ps(X.as_ptr().add(base + j as usize));
+                    s[0] = _mm256_fmadd_ps(x0, x0, s[0]);
+                    let x1 = _mm256_loadu_ps(X.as_ptr().add(base + j as usize + 8));
+                    s[1] = _mm256_fmadd_ps(x1, x1, s[1]);
+                    j += 16;
+                }
+                while j < len - 7 {
+                    let x0 = _mm256_loadu_ps(X.as_ptr().add(base + j as usize));
+                    s[0] = _mm256_fmadd_ps(x0, x0, s[0]);
+                    j += 8;
+                }
+                let sum8 = _mm256_add_ps(s[0], s[1]);
+                let lo = _mm256_castps256_ps128(sum8);
+                let hi = _mm256_extractf128_ps::<1>(sum8);
+                let mut r = _mm_add_ps(lo, hi);
+                r = _mm_add_ps(r, _mm_movehl_ps(r, r));
+                r = _mm_add_ss(r, _mm_shuffle_ps::<0x55>(r, r));
+                let mut sum = _mm_cvtss_f32(r);
+                while j < len {
+                    let k = base + j as usize;
+                    let xv = *X.get_unchecked(k);
+                    sum = MAC16_16(sum, xv, xv);
+                    j += 1;
+                }
+                bandE[(i + c * m.nbEBands) as usize] = celt_sqrt(1e-27f32 + sum);
+            }
+        }
+    }
+}
+
 /* Compute the amplitude (sqrt energy) in each of the bands */
 /// `compute_band_energies()` — float body (`FIXED_POINT` undefined).
+///
+/// With `--features fast` and AVX2+FMA present, [`compute_band_energies_avx2`]
+/// sums each band with two 8-lane FMA accumulator chains instead of calling
+/// [`celt_inner_prod`]; the fused loop avoids the per-band dispatch and is not
+/// bit-identical to libopus.
 pub fn compute_band_energies(
     m: &CELTMode,
     X: &[celt_sig],
@@ -150,6 +208,15 @@ pub fn compute_band_energies(
     arch: i32,
 ) {
     let _ = arch;
+    #[cfg(all(feature = "fast", target_arch = "x86_64"))]
+    {
+        if super::kernels::have_avx2_fma() {
+            // SAFETY: `have_avx2_fma()` guarantees AVX2+FMA.  Every band lies
+            // inside `X`: `off + len` is at most `C*N` by the mode's `eBands`.
+            unsafe { compute_band_energies_avx2(m, X, bandE, end, C, LM) };
+            return;
+        }
+    }
     let eBands = &m.eBands;
     let N: i32 = m.shortMdctSize << LM;
     for c in 0..C {

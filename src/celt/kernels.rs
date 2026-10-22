@@ -44,7 +44,9 @@
 //!   else the C uses separate `_mm_mul_ps`/`_mm_add_ps`.  The crate is built for
 //!   the x86-64 baseline (no `-mfma`, no `.cargo/config`), so LLVM cannot
 //!   contract plain `a * b + c` into an FMA, and `f32::mul_add` is used exactly
-//!   where the C uses a fused intrinsic.
+//!   where the C uses a fused intrinsic.  The opt-in `fast` feature adds
+//!   AVX2+FMA *variants* of some kernels (see the `[fast]` section below and
+//!   `docs/progress.md`); it never changes these default bodies.
 //!
 //! # Slice-length requirements (the C reads past the logical end)
 //!
@@ -925,6 +927,10 @@ fn simd_rsqrt_ps_v4(a: [f32; 4]) -> [f32; 4] {
 /// `_mm_loadu_ps(y+j+3)` and the tail's `_mm_loadu_ps(y+j)` read up to
 /// `y[len+2]`.  The C callers allocate with 3 extra elements (e.g. `celt_fir`,
 /// `op_pvq_search`).
+///
+/// With `--features fast` and AVX2+FMA present, `len >= 24` is handled by
+/// [`xcorr_kernel_avx2_fma_hw`]: four 8-lane FMA accumulators instead of the
+/// two 4-lane mul+add accumulators below.
 pub fn xcorr_kernel(x: &[f32], y: &[f32], sum: &mut [f32; 4], len: i32) {
     debug_assert!(len >= 0);
     debug_assert!(x.len() >= len as usize, "xcorr_kernel: x needs len elements");
@@ -933,6 +939,17 @@ pub fn xcorr_kernel(x: &[f32], y: &[f32], sum: &mut [f32; 4], len: i32) {
             y.len() >= len as usize + 3,
             "xcorr_kernel: y needs len+3 elements"
         );
+    }
+    #[cfg(all(feature = "fast", target_arch = "x86_64"))]
+    {
+        /* `len >= 24`: the four 8-lane horizontal reductions dominate below
+           that (measured len=8 7.3 -> 11.0 ns, len=24 16.4 -> 14.6 ns). */
+        if len >= 24 && have_avx2_fma() {
+            /* SAFETY: `have_avx2_fma()` guarantees AVX2+FMA and the asserts
+               above give the slice contract of the variant. */
+            unsafe { xcorr_kernel_avx2_fma_hw(x, y, sum, len) };
+            return;
+        }
     }
     /* SSE is part of the x86-64 baseline (`OPUS_X86_PRESUME_SSE` in the
        reference build), so the C body is transcribed instruction for
@@ -1190,17 +1207,226 @@ unsafe fn celt_inner_prod_sse_hw(x: &[f32], y: &[f32], n: i32) -> f32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// [fast] AVX2+FMA variants
+//
+// Everything in this section is compiled only with `--features fast` and is
+// reached only behind the run-time `have_avx2_fma()` check, so a CPU without
+// FMA keeps executing the bit-exact bodies above.  The variants deliberately
+// change the floating-point operation order (8 lanes instead of 4, fused
+// multiply-add instead of mul+add) and are therefore *not* bit-identical to
+// libopus; see `docs/progress.md`.
+// ---------------------------------------------------------------------------
+
+/// `[fast]` 8-lane AVX2+FMA `celt_inner_prod`: four `__m256` accumulator
+/// chains (32 samples per iteration) to hide the 5-cycle FMA latency — a single
+/// chain is latency-bound and barely faster than the 4-lane SSE kernel — folded
+/// as `(s0+s1)+(s2+s3)` and then with the 8→4→1 tree
+/// `((s0+s4)+(s2+s6)) + ((s1+s5)+(s3+s7))`, followed by the `N mod 8` tail with
+/// scalar `MAC16_16`.  Requires `n >= 8`.
+#[cfg(all(feature = "fast", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn celt_inner_prod_avx2_fma_hw(x: &[f32], y: &[f32], n: i32) -> f32 {
+    use core::arch::x86_64::*;
+    // SAFETY: the caller checks `n >= 8` and `x.len()`, `y.len() >= n`.  Every
+    // 8-lane load starts at `i + lane_block*8` with `i + lane_block*8 + 8 <= n`.
+    unsafe {
+        let mut s = [_mm256_setzero_ps(); 4];
+        let mut i: i32 = 0;
+        while i < n - 31 {
+            let ii = i as usize;
+            s[0] = _mm256_fmadd_ps(
+                _mm256_loadu_ps(x.as_ptr().add(ii)),
+                _mm256_loadu_ps(y.as_ptr().add(ii)),
+                s[0],
+            );
+            s[1] = _mm256_fmadd_ps(
+                _mm256_loadu_ps(x.as_ptr().add(ii + 8)),
+                _mm256_loadu_ps(y.as_ptr().add(ii + 8)),
+                s[1],
+            );
+            s[2] = _mm256_fmadd_ps(
+                _mm256_loadu_ps(x.as_ptr().add(ii + 16)),
+                _mm256_loadu_ps(y.as_ptr().add(ii + 16)),
+                s[2],
+            );
+            s[3] = _mm256_fmadd_ps(
+                _mm256_loadu_ps(x.as_ptr().add(ii + 24)),
+                _mm256_loadu_ps(y.as_ptr().add(ii + 24)),
+                s[3],
+            );
+            i += 32;
+        }
+        while i < n - 7 {
+            let ii = i as usize;
+            s[0] = _mm256_fmadd_ps(
+                _mm256_loadu_ps(x.as_ptr().add(ii)),
+                _mm256_loadu_ps(y.as_ptr().add(ii)),
+                s[0],
+            );
+            i += 8;
+        }
+        let sum = _mm256_add_ps(_mm256_add_ps(s[0], s[1]), _mm256_add_ps(s[2], s[3]));
+        let lo = _mm256_castps256_ps128(sum);
+        let hi = _mm256_extractf128_ps::<1>(sum);
+        let mut r = _mm_add_ps(lo, hi);
+        r = _mm_add_ps(r, _mm_movehl_ps(r, r));
+        r = _mm_add_ss(r, _mm_shuffle_ps::<0x55>(r, r));
+        let mut xy = _mm_cvtss_f32(r);
+        while i < n {
+            let ii = i as usize;
+            xy = MAC16_16(xy, *x.get_unchecked(ii), *y.get_unchecked(ii));
+            i += 1;
+        }
+        xy
+    }
+}
+
+/// `[fast]` 8-lane AVX2+FMA `dual_inner_prod`: two accumulators per product
+/// (four independent FMA chains), so the loop is throughput- rather than
+/// latency-bound; each product is reduced as in
+/// [`celt_inner_prod_avx2_fma_hw`], then the `N mod 8` tail is added for both.
+/// Requires `n >= 8`.
+#[cfg(all(feature = "fast", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dual_inner_prod_avx2_fma_hw(
+    x: &[f32],
+    y01: &[f32],
+    y02: &[f32],
+    n: i32,
+    xy1: &mut f32,
+    xy2: &mut f32,
+) {
+    use core::arch::x86_64::*;
+    // SAFETY: the caller checks `n >= 8` and that all three slices hold at
+    // least `n` elements; every 8-lane load stays inside them.
+    unsafe {
+        let mut s1 = [_mm256_setzero_ps(); 2];
+        let mut s2 = [_mm256_setzero_ps(); 2];
+        let mut i: i32 = 0;
+        while i < n - 15 {
+            let ii = i as usize;
+            let x0 = _mm256_loadu_ps(x.as_ptr().add(ii));
+            s1[0] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y01.as_ptr().add(ii)), s1[0]);
+            s2[0] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y02.as_ptr().add(ii)), s2[0]);
+            let x1 = _mm256_loadu_ps(x.as_ptr().add(ii + 8));
+            s1[1] = _mm256_fmadd_ps(x1, _mm256_loadu_ps(y01.as_ptr().add(ii + 8)), s1[1]);
+            s2[1] = _mm256_fmadd_ps(x1, _mm256_loadu_ps(y02.as_ptr().add(ii + 8)), s2[1]);
+            i += 16;
+        }
+        while i < n - 7 {
+            let ii = i as usize;
+            let xi = _mm256_loadu_ps(x.as_ptr().add(ii));
+            s1[0] = _mm256_fmadd_ps(xi, _mm256_loadu_ps(y01.as_ptr().add(ii)), s1[0]);
+            s2[0] = _mm256_fmadd_ps(xi, _mm256_loadu_ps(y02.as_ptr().add(ii)), s2[0]);
+            i += 8;
+        }
+        let v1 = _mm256_add_ps(s1[0], s1[1]);
+        let v2 = _mm256_add_ps(s2[0], s2[1]);
+        let lo1 = _mm256_castps256_ps128(v1);
+        let hi1 = _mm256_extractf128_ps::<1>(v1);
+        let mut r1 = _mm_add_ps(lo1, hi1);
+        r1 = _mm_add_ps(r1, _mm_movehl_ps(r1, r1));
+        r1 = _mm_add_ss(r1, _mm_shuffle_ps::<0x55>(r1, r1));
+        let mut a = _mm_cvtss_f32(r1);
+        let lo2 = _mm256_castps256_ps128(v2);
+        let hi2 = _mm256_extractf128_ps::<1>(v2);
+        let mut r2 = _mm_add_ps(lo2, hi2);
+        r2 = _mm_add_ps(r2, _mm_movehl_ps(r2, r2));
+        r2 = _mm_add_ss(r2, _mm_shuffle_ps::<0x55>(r2, r2));
+        let mut b = _mm_cvtss_f32(r2);
+        while i < n {
+            let ii = i as usize;
+            a = MAC16_16(a, *x.get_unchecked(ii), *y01.get_unchecked(ii));
+            b = MAC16_16(b, *x.get_unchecked(ii), *y02.get_unchecked(ii));
+            i += 1;
+        }
+        *xy1 = a;
+        *xy2 = b;
+    }
+}
+
+/// `[fast]` 8-lane AVX2+FMA `xcorr_kernel`: four lags (`sum[0..4]`), eight `m`
+/// values per iteration, one `__m256` FMA accumulator per lag.  Each
+/// accumulator is reduced with the same `(s0+s4)+(s2+s6) + (s1+s5)+(s3+s7)`
+/// tree as the inner-product variants, and the `len mod 8` tail is added with
+/// scalar `MAC16_16` on top of the caller's initial `sum`.
+///
+/// # Slice lengths
+/// Same contract as [`xcorr_kernel`]: `x.len() >= len`, `y.len() >= len + 3`.
+/// The vector loop runs while `i + 8 <= len`, so its last `y` load starts at
+/// `i + 3 <= len - 5` and its highest element is `y[len + 2]`.
+#[cfg(all(feature = "fast", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn xcorr_kernel_avx2_fma_hw(x: &[f32], y: &[f32], sum: &mut [f32; 4], len: i32) {
+    use core::arch::x86_64::*;
+    debug_assert!(len >= 8);
+    debug_assert!(x.len() >= len as usize);
+    debug_assert!(y.len() >= len as usize + 3);
+    // SAFETY: the vector loop's loads are `x[i .. i+8]` with `i+8 <= len` and
+    // `y[i+k .. i+k+8]` with `k <= 3`, whose highest index is `len+2`; the tail
+    // reads `y[i+3]` with `i < len`.  `sum` is a `[f32; 4]`.
+    unsafe {
+        let mut s = [_mm256_setzero_ps(); 4];
+        let mut i: i32 = 0;
+        while i + 8 <= len {
+            let ii = i as usize;
+            let x0 = _mm256_loadu_ps(x.as_ptr().add(ii));
+            s[0] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii)), s[0]);
+            s[1] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii + 1)), s[1]);
+            s[2] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii + 2)), s[2]);
+            s[3] = _mm256_fmadd_ps(x0, _mm256_loadu_ps(y.as_ptr().add(ii + 3)), s[3]);
+            i += 8;
+        }
+        let mut out = *sum;
+        for k in 0..4 {
+            let lo = _mm256_castps256_ps128(s[k]);
+            let hi = _mm256_extractf128_ps::<1>(s[k]);
+            let mut r = _mm_add_ps(lo, hi);
+            r = _mm_add_ps(r, _mm_movehl_ps(r, r));
+            r = _mm_add_ss(r, _mm_shuffle_ps::<0x55>(r, r));
+            out[k] += _mm_cvtss_f32(r);
+        }
+        while i < len {
+            let ii = i as usize;
+            let xv = *x.get_unchecked(ii);
+            out[0] = MAC16_16(out[0], xv, *y.get_unchecked(ii));
+            out[1] = MAC16_16(out[1], xv, *y.get_unchecked(ii + 1));
+            out[2] = MAC16_16(out[2], xv, *y.get_unchecked(ii + 2));
+            out[3] = MAC16_16(out[3], xv, *y.get_unchecked(ii + 3));
+            i += 1;
+        }
+        *sum = out;
+    }
+}
+
 /// `celt/x86/pitch_sse.c:108` `celt_inner_prod_sse`.
 ///
 /// One 4-lane accumulator; the horizontal reduction is exactly
 /// `(s0 + s2) + (s1 + s3)`, then the remaining `N mod 4` elements are added
 /// sequentially with `MAC16_16` (mul then add, no FMA).
 ///
+/// With `--features fast` and AVX2+FMA present, an 8-lane FMA variant
+/// ([`celt_inner_prod_avx2_fma_hw`]) is used for `N >= 32` instead.  It is
+/// arithmetically close but not bit-identical, which is the point of the
+/// feature.
+///
 /// `x.len() >= N` and `y.len() >= N` (no over-read).
 pub fn celt_inner_prod(x: &[f32], y: &[f32], n: i32) -> f32 {
     debug_assert!(n >= 0);
     debug_assert!(x.len() >= n as usize);
     debug_assert!(y.len() >= n as usize);
+    #[cfg(all(feature = "fast", target_arch = "x86_64"))]
+    {
+        /* `n >= 32`: below that the 8-lane reduction (extract, two shuffles,
+           two adds) costs more than the vector loop saves; measured n=8 4.7 ->
+           6.5 ns, n=16 5.9 -> 6.5 ns, n=32 8.3 -> 7.5 ns. */
+        if n >= 32 && have_avx2_fma() {
+            // SAFETY: `have_avx2_fma()` guarantees the instruction set and the
+            // asserts above give the slice lengths.
+            return unsafe { celt_inner_prod_avx2_fma_hw(x, y, n) };
+        }
+    }
     #[cfg(target_arch = "x86_64")]
     {
         // SAFETY: SSE/SSE2 are baseline; the asserts above give the length
@@ -1300,6 +1526,8 @@ unsafe fn dual_inner_prod_sse_hw(
 ///
 /// Two independent 4-lane accumulators, each reduced as `(s0+s2)+(s1+s3)`,
 /// then the remaining `N mod 4` elements are accumulated sequentially.
+/// With `--features fast` and AVX2+FMA present, the 8-lane FMA variant
+/// [`dual_inner_prod_avx2_fma_hw`] is used for `N >= 32` instead.
 /// `x`, `y01` and `y02` need `N` elements each; `xy1`/`xy2` are written.
 pub fn dual_inner_prod(
     x: &[f32],
@@ -1313,6 +1541,15 @@ pub fn dual_inner_prod(
     debug_assert!(x.len() >= n as usize);
     debug_assert!(y01.len() >= n as usize);
     debug_assert!(y02.len() >= n as usize);
+    #[cfg(all(feature = "fast", target_arch = "x86_64"))]
+    {
+        if n >= 32 && have_avx2_fma() {
+            // SAFETY: `have_avx2_fma()` guarantees the instruction set and the
+            // asserts above give the slice lengths.
+            unsafe { dual_inner_prod_avx2_fma_hw(x, y01, y02, n, xy1, xy2) };
+            return;
+        }
+    }
     #[cfg(target_arch = "x86_64")]
     {
         // SAFETY: SSE/SSE2 are baseline; the asserts above give the length
@@ -1406,6 +1643,10 @@ pub fn comb_filter_const(y: &mut [f32], x: &[f32], t: i32, n: i32, g10: f32, g11
        grouping `(g11·(x3+x1)) + (g12·(x4+x0))`, which is what makes it differ
        from `comb_filter_const_c`.  The `[f32; 4]` emulation below stays as the
        fallback. */
+    /* `--features fast` deliberately keeps this body: an `_mm_fmadd_ps`
+       variant was measured 460 -> 475 ns per N=960 call (+3 %) — the kernel is
+       load/shuffle-bound and the out-of-line `target_feature` call costs more
+       than the three fused multiply-adds save — so it was reverted. */
     #[cfg(target_arch = "x86_64")]
     {
         use core::arch::x86_64::*;
@@ -1804,6 +2045,14 @@ fn xcorr_kernel_avx(x: &[f32], y: &[f32], sum: &mut [f32; 8], len: i32) {
 /// `y.len() >= max_pitch + len - 1` (the AVX2 blocks read up to
 /// `y[max_pitch-8+14]`, the SSE tail up to `y[max_pitch-1+len-1]`).
 pub fn celt_pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: i32, max_pitch: i32) {
+    #[cfg(all(feature = "fast", target_arch = "x86_64"))]
+    if have_avx2_fma() {
+        // SAFETY: guarded by `have_avx2_fma()`.
+        unsafe {
+            celt_pitch_xcorr_fast_hw(x, y, xcorr, len, max_pitch);
+        }
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if have_avx2_fma() {
         // SAFETY: guarded by `have_avx2_fma()`.
@@ -1813,6 +2062,48 @@ pub fn celt_pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: i32, max_p
         return;
     }
     celt_pitch_xcorr_avx2_body(x, y, xcorr, len, max_pitch)
+}
+
+/// `[fast]` `celt_pitch_xcorr` with the 8-lag AVX2+FMA kernel called directly.
+///
+/// The arithmetic is identical to [`celt_pitch_xcorr_hw`] (the C already
+/// contracts `xcorr_kernel_avx` into `celt_pitch_xcorr_avx2`); the difference is
+/// that the per-8-lag-block `have_avx2_fma()` dispatch of [`xcorr_kernel_avx`]
+/// is skipped, which matters for the small frame sizes where `celt_pitch_xcorr`
+/// is called with only a handful of lag blocks.
+#[cfg(all(feature = "fast", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn celt_pitch_xcorr_fast_hw(
+    x: &[f32],
+    y: &[f32],
+    xcorr: &mut [f32],
+    len: i32,
+    max_pitch: i32,
+) {
+    debug_assert!(max_pitch > 0);
+    debug_assert!(len > 0);
+    debug_assert!(x.len() >= len as usize);
+    debug_assert!(xcorr.len() >= max_pitch as usize);
+    debug_assert!(y.len() >= (max_pitch - 1 + len) as usize);
+    // SAFETY: `have_avx2_fma()` guards the call site; the asserts above give
+    // the slice contract of `xcorr_kernel_avx_hw`.
+    unsafe {
+        let mut i: i32 = 0;
+        while i < max_pitch - 7 {
+            let ii = i as usize;
+            let mut sum = [0.0f32; 8];
+            xcorr_kernel_avx_hw(x, &y[ii..], &mut sum, len);
+            for k in 0..8 {
+                *xcorr.get_unchecked_mut(ii + k) = sum[k];
+            }
+            i += 8;
+        }
+        while i < max_pitch {
+            let ii = i as usize;
+            *xcorr.get_unchecked_mut(ii) = celt_inner_prod(x, &y[ii..], len);
+            i += 1;
+        }
+    }
 }
 
 /// [`celt_pitch_xcorr_avx2_body`] compiled for AVX2+FMA.
@@ -2173,6 +2464,12 @@ fn op_pvq_search_sse2_emu(
 /// (`0x4E` then `0xB1`), the `(K+.8) * _mm_rcp_ps(sums)` projection, the
 /// "double `y`" convention, the `_mm_max_epi16` tie-break chain and the final
 /// `_mm_xor_si128` sign restore are the same instructions.
+///
+/// This body is also used by the `fast` build: an `_mm_fmadd_ps` version of the
+/// projection dot products was measured **9-11 % slower** (the loop is a serial
+/// accumulator chain; FMA latency 5 vs add latency 3, and recompiling the whole
+/// kernel under `target_feature(fma)` costs more than the contraction saves), so
+/// `--features fast` deliberately keeps this exact body.
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
 fn op_pvq_search_sse2_hw(

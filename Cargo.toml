@@ -3,4 +3,10 @@ name = "oprs"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Opt-in speed over exactness: selects AVX2+FMA-contracted variants of the
+# CELT kernels (still guarded by a run-time AVX2+FMA check).  The default build
+# is unchanged and remains bit-exact with libopus 1.6.1.
+fast = []
+
 [dependencies]
